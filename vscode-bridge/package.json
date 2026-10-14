@@ -1,0 +1,124 @@
+{
+  "name": "codefori-cli",
+  "displayName": "Code for IBM i CLI",
+  "description": "Programmatic bridge enabling external automation, shell scripts, and AI agents to invoke Code for IBM i actions, manage IFS deployments, and trigger builds.",
+  "version": "0.1.2",
+  "icon": "icon.png",
+  "publisher": "rishabkshk",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rishabkshk/code-for-ibmi-bridge.git"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:codeForIBMiBridge.start",
+    "onCommand:codeForIBMiBridge.stop",
+    "onCommand:codeForIBMiBridge.resetToken",
+    "onCommand:codeForIBMiBridge.showStatus",
+    "onCommand:codeForIBMiBridge.configureSecurity"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codeForIBMiBridge.start",
+        "title": "Code for IBM i Bridge: Start Server"
+      },
+      {
+        "command": "codeForIBMiBridge.stop",
+        "title": "Code for IBM i Bridge: Stop Server"
+      },
+      {
+        "command": "codeForIBMiBridge.resetToken",
+        "title": "Code for IBM i Bridge: Reset Auth Token"
+      },
+      {
+        "command": "codeForIBMiBridge.showStatus",
+        "title": "Code for IBM i Bridge: Show Status"
+      },
+      {
+        "command": "codeForIBMiBridge.configureSecurity",
+        "title": "Code for IBM i Bridge: Configure Security Policy"
+      }
+    ],
+    "configuration": {
+      "title": "Code for IBM i Bridge",
+      "properties": {
+        "codeForIBMiBridge.port": {
+          "type": "number",
+          "default": 0,
+          "description": "Port for the HTTP Bridge server (0 for ephemeral dynamic port allocation)."
+        },
+        "codeForIBMiBridge.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the Bridge HTTP server upon extension activation."
+        },
+        "codeForIBMiBridge.security.policy": {
+          "type": "string",
+          "enum": [
+            "prompt",
+            "block",
+            "modal",
+            "allow"
+          ],
+          "default": "prompt",
+          "description": "Security policy for destructive commands: 'prompt' asks agent to confirm in chat and pass confirm flag (default), 'modal' shows VS Code popup dialog, 'block' automatically rejects, 'allow' permits execution."
+        },
+        "codeForIBMiBridge.security.promptTimeoutSeconds": {
+          "type": "number",
+          "default": 60,
+          "description": "Timeout in seconds to wait for user confirmation before timing out and rejecting the command."
+        },
+        "codeForIBMiBridge.security.customBlockedCommands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "List of command names, prefixes, or regular expressions that are unconditionally blocked."
+        },
+        "codeForIBMiBridge.security.customPromptCommands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "List of additional command names, prefixes, or regular expressions that require interactive user confirmation."
+        },
+        "codeForIBMiBridge.security.allowedCommands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Whitelist of command patterns or prefixes exempt from destructive checks."
+        },
+        "codeForIBMiBridge.security.enableActionInspection": {
+          "type": "boolean",
+          "default": true,
+          "description": "Inspect commands defined in actions (/run-action) for destructive patterns before running."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "build": "npm run compile",
+    "package": "npx @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.5"
+  }
+}

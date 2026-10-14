@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Compilation outputs
+out/
+dist/
+cli/bin/
+*.tsbuildinfo
+
+# VS Code test and runtime data
+.vscode-test/
+*.vsix
+*.tgz
+
+# Local reference clones
+vscode-ibmi-ref/
+
+# Bridge local state files
+.codefori/
+*.codefori-bridge.json
+
+# Logs & temp files
+*.log
+npm-debug.log*
+yarn-debug.log*
+
+# System files
+.DS_Store
+Thumbs.db

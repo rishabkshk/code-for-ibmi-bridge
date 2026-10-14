@@ -1,0 +1,20 @@
+{
+  "name": "code-for-ibmi-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Monorepo for VS Code IBM i Bridge extension and companion CLI",
+  "workspaces": [
+    "vscode-bridge",
+    "cli"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=vscode-bridge && npm run build --workspace=cli",
+    "compile": "npm run compile --workspace=vscode-bridge && npm run compile --workspace=cli",
+    "package": "npm run package --workspace=vscode-bridge",
+    "watch": "npm run watch --workspaces",
+    "test": "node scripts/test-runner.js"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  }
+}
