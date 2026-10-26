@@ -2,7 +2,7 @@
   "name": "codefori-cli",
   "displayName": "Code for IBM i CLI",
   "description": "Programmatic bridge enabling external automation, shell scripts, and AI agents to invoke Code for IBM i actions, manage IFS deployments, and trigger builds.",
-  "version": "0.1.2",
+  "version": "0.2.3",
   "icon": "icon.png",
   "publisher": "rishabkshk",
   "license": "MIT",
@@ -14,7 +14,17 @@
     "vscode": "^1.90.0"
   },
   "categories": [
-    "Other"
+    "Other",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "ibmi",
+    "as400",
+    "rpgle",
+    "code-for-ibmi",
+    "cli",
+    "automation",
+    "ai-agent"
   ],
   "activationEvents": [
     "onStartupFinished",
@@ -22,7 +32,10 @@
     "onCommand:codeForIBMiBridge.stop",
     "onCommand:codeForIBMiBridge.resetToken",
     "onCommand:codeForIBMiBridge.showStatus",
-    "onCommand:codeForIBMiBridge.configureSecurity"
+    "onCommand:codeForIBMiBridge.configureSecurity",
+    "onCommand:codeForIBMiBridge.copyCurlCommand",
+    "onCommand:codeForIBMiBridge.configureCliMode",
+    "onCommand:codeForIBMiBridge.installNpmCli"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -46,22 +59,96 @@
       {
         "command": "codeForIBMiBridge.configureSecurity",
         "title": "Code for IBM i Bridge: Configure Security Policy"
+      },
+      {
+        "command": "codeForIBMiBridge.configureCliMode",
+        "title": "Code for IBM i Bridge: Configure CLI Mode"
+      },
+      {
+        "command": "codeForIBMiBridge.copyCurlCommand",
+        "title": "Code for IBM i Bridge: Copy CLI Command"
+      },
+      {
+        "command": "codeForIBMiBridge.installNpmCli",
+        "title": "Code for IBM i Bridge: Install CLI via npm",
+        "icon": "$(package)"
+      },
+      {
+        "command": "codeForIBMiBridge.openSettings",
+        "title": "Code for IBM i Bridge: Open Settings",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "codeForIBMiBridge.generateAgentDoc",
+        "title": "Code for IBM i Bridge: Generate AI Agent Instructions (AGENTS.md)",
+        "icon": "$(book)"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "code-for-ibmi-bridge",
+          "title": "Code for IBM i Bridge",
+          "icon": "media/bridge-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "code-for-ibmi-bridge": [
+        {
+          "id": "codeForIBMiBridge.sidebar",
+          "name": "Bridge & CLI Overview"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "codeForIBMiBridge.openSettings",
+          "when": "view == codeForIBMiBridge.sidebar",
+          "group": "navigation"
+        },
+        {
+          "command": "codeForIBMiBridge.showStatus",
+          "when": "view == codeForIBMiBridge.sidebar",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "Code for IBM i Bridge",
       "properties": {
-        "codeForIBMiBridge.port": {
+        "code-for-ibmi-bridge.port": {
           "type": "number",
           "default": 0,
           "description": "Port for the HTTP Bridge server (0 for ephemeral dynamic port allocation)."
         },
-        "codeForIBMiBridge.autoStart": {
+        "code-for-ibmi-bridge.autoStart": {
           "type": "boolean",
           "default": true,
           "description": "Automatically start the Bridge HTTP server upon extension activation."
         },
-        "codeForIBMiBridge.security.policy": {
+        "code-for-ibmi-bridge.cliMode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "npm",
+            "curl"
+          ],
+          "enumDescriptions": [
+            "Auto-detect: Prefer npm package (@rishabkshk/codefori-cli) if installed, otherwise use Git Bash / POSIX curl script (Default).",
+            "npm: Use Node.js / npm CLI package (@rishabkshk/codefori-cli).",
+            "curl: Use zero-dependency Git Bash / POSIX curl script (codefori.sh)."
+          ],
+          "default": "auto",
+          "markdownDescription": "CLI interaction mode for Code for IBM i Bridge: `'auto'` prefers npm package if installed, otherwise uses Git Bash / POSIX curl script; `'npm'` forces the Node.js/npm package; `'curl'` forces the zero-dependency Git Bash / POSIX curl script."
+        },
+        "code-for-ibmi-bridge.promptOnMissingNpm": {
+          "type": "boolean",
+          "default": false,
+          "description": "Prompt the user regarding npm package installation when Node.js is detected on the system."
+        },
+        "code-for-ibmi-bridge.security.policy": {
           "type": "string",
           "enum": [
             "prompt",
@@ -69,15 +156,89 @@
             "modal",
             "allow"
           ],
+          "enumDescriptions": [
+            "Require AI agent or client to request user confirmation in chat before execution (Default).",
+            "Strictly block all destructive commands automatically.",
+            "Display an interactive modal confirmation dialog in VS Code for user approval.",
+            "Permit execution of destructive commands without guardrail restrictions."
+          ],
           "default": "prompt",
-          "description": "Security policy for destructive commands: 'prompt' asks agent to confirm in chat and pass confirm flag (default), 'modal' shows VS Code popup dialog, 'block' automatically rejects, 'allow' permits execution."
+          "markdownDescription": "Security policy for destructive commands: `'prompt'` asks agent to confirm in chat and pass `--confirm` flag (default), `'modal'` shows VS Code popup dialog, `'block'` automatically rejects, `'allow'` permits execution."
         },
-        "codeForIBMiBridge.security.promptTimeoutSeconds": {
+        "code-for-ibmi-bridge.security.qshPolicy": {
+          "type": "string",
+          "enum": [
+            "block",
+            "prompt",
+            "modal",
+            "allow"
+          ],
+          "enumDescriptions": [
+            "Strictly block all QSH shell commands and actions in QSH environment (Default).",
+            "Require AI agent or client to request user confirmation in chat before execution.",
+            "Display an interactive modal confirmation dialog in VS Code for user approval.",
+            "Permit execution of QSH commands and actions without restrictions."
+          ],
+          "default": "block",
+          "markdownDescription": "Security policy governing QSH commands and environments. `'block'` strictly disables QSH (default), `'prompt'` requires confirmation (`--confirm`), `'modal'` shows VS Code popup dialog, `'allow'` permits execution."
+        },
+        "code-for-ibmi-bridge.security.clPolicy": {
+          "type": "string",
+          "enum": [
+            "prompt",
+            "block",
+            "modal",
+            "allow"
+          ],
+          "enumDescriptions": [
+            "Require explicit confirmation (--confirm flag) for direct CL commands (Default).",
+            "Strictly block direct CL commands automatically.",
+            "Display an interactive modal confirmation dialog in VS Code for user approval.",
+            "Permit direct CL commands to execute without confirmation."
+          ],
+          "default": "prompt",
+          "markdownDescription": "Security policy governing direct IBM i CL commands (`/run-cl`). `'prompt'` requires confirmation (`--confirm`) (default), `'block'` rejects direct CL commands, `'modal'` shows VS Code popup dialog, `'allow'` permits execution without confirmation. Predefined workspace actions are exempted."
+        },
+        "code-for-ibmi-bridge.security.pasePolicy": {
+          "type": "string",
+          "enum": [
+            "block",
+            "prompt",
+            "modal",
+            "allow"
+          ],
+          "enumDescriptions": [
+            "Strictly block all direct PASE shell execution automatically (Default).",
+            "Require explicit confirmation (--confirm flag) for direct PASE shell execution.",
+            "Display an interactive modal confirmation dialog in VS Code for PASE shell execution.",
+            "Permit PASE shell execution without restrictions (subject to destructive command checks)."
+          ],
+          "default": "block",
+          "markdownDescription": "Security policy governing IBM i PASE shell commands and environments. `'block'` strictly disables direct PASE shell execution (default), `'prompt'` requires confirmation (`--confirm`), `'modal'` shows VS Code popup dialog, `'allow'` permits execution."
+        },
+        "code-for-ibmi-bridge.security.deployPolicy": {
+          "type": "string",
+          "enum": [
+            "prompt",
+            "modal",
+            "block",
+            "allow"
+          ],
+          "enumDescriptions": [
+            "Prioritize explicit file selection (select method) or require user confirmation with change list for blanket deploys (Default).",
+            "Display an interactive modal confirmation dialog in VS Code showing the list of changed files.",
+            "Strictly block blanket deployments; only targeted file deployments via select method are permitted.",
+            "Permit deployments without confirmation prompts."
+          ],
+          "default": "prompt",
+          "markdownDescription": "Security policy governing workspace deployments to IBM i IFS. `'prompt'` requires file selection or user confirmation with the change list (default), `'modal'` shows VS Code dialog, `'block'` prohibits unselected deploys, `'allow'` permits deployment."
+        },
+        "code-for-ibmi-bridge.security.promptTimeoutSeconds": {
           "type": "number",
           "default": 60,
           "description": "Timeout in seconds to wait for user confirmation before timing out and rejecting the command."
         },
-        "codeForIBMiBridge.security.customBlockedCommands": {
+        "code-for-ibmi-bridge.security.customBlockedCommands": {
           "type": "array",
           "items": {
             "type": "string"
@@ -85,7 +246,7 @@
           "default": [],
           "description": "List of command names, prefixes, or regular expressions that are unconditionally blocked."
         },
-        "codeForIBMiBridge.security.customPromptCommands": {
+        "code-for-ibmi-bridge.security.customPromptCommands": {
           "type": "array",
           "items": {
             "type": "string"
@@ -93,7 +254,7 @@
           "default": [],
           "description": "List of additional command names, prefixes, or regular expressions that require interactive user confirmation."
         },
-        "codeForIBMiBridge.security.allowedCommands": {
+        "code-for-ibmi-bridge.security.allowedCommands": {
           "type": "array",
           "items": {
             "type": "string"
@@ -101,14 +262,26 @@
           "default": [],
           "description": "Whitelist of command patterns or prefixes exempt from destructive checks."
         },
-        "codeForIBMiBridge.security.enableActionInspection": {
+        "code-for-ibmi-bridge.security.enableActionInspection": {
           "type": "boolean",
           "default": true,
           "description": "Inspect commands defined in actions (/run-action) for destructive patterns before running."
+        },
+        "code-for-ibmi-bridge.security.requireCliClient": {
+          "type": "boolean",
+          "default": true,
+          "description": "Block direct raw curl/HTTP access to the bridge server and require requests to originate from the official Code for IBM i CLI (codefori / codefori.sh)."
+        },
+        "code-for-ibmi-bridge.generateAgentDoc": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically generate or maintain an AGENTS.md helper guide in the active workspace root for AI coding agents."
         }
       }
     }
   },
+
+
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",

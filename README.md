@@ -84,19 +84,42 @@ code-for-ibmi-bridge/
    - All requests require the `X-CodeForIBMi-Token` header.
    - Missing or mismatched tokens are rejected with `401 Unauthorized` (`{ "error": "Invalid or missing bridge token" }`).
    - Token comparison uses `crypto.timingSafeEqual` to safeguard against timing side-channel attacks.
-3. **Dynamic Ephemeral Ports**: Defaults to port `0`, allowing the operating system to dynamically assign an unused ephemeral port. Configurable via VS Code settings (`codeForIBMiBridge.port`).
+3. **Dynamic Ephemeral Ports**: Defaults to port `0`, allowing the operating system to dynamically assign an unused ephemeral port. Configurable via VS Code settings (`code-for-ibmi-bridge.port`).
 4. **Destructive Command Guardrail (AI Agent Safeguard)**:
    - External automation tools and AI coding agents can execute commands on the connected IBM i system via `/run-cl` or `/run-command`. To prevent unintended system destruction or data loss, the bridge features an integrated **Security Guardrail**.
    - **Pattern Detection**: Automatically classifies and intercepts destructive operations:
      - **IBM i CL**: Any deletion verb (`DLTLIB`, `DLTOBJ`, `DLTF`, `DLTUSRPRF`, `DLTMSGF`, `DLTPGM`, `DLTSRVPGM`, `DLTDIR`, `DLTSPLF`, etc.), file clears (`CLRPFM`, `CLRLIB`), disruptive system controls (`PWRDWNSYS`, `ENDSBS`, `ENDSYS`, `ENDJOB`, `RCLSTG`, `INZSYS`), destructive SQL (`RUNSQL/RUNSQLSTM` containing `DROP`, `TRUNCATE`, `DELETE FROM`), and authority changes (`CHGUSRPRF`, `RVKOBJAUT`).
      - **PASE / QSH**: Recursive/forced file removals (`rm -rf`, `rm -r`, `rmdir`, `unlink`), process kills (`kill -9`, `killall`, `pkill`), system restarts/halts (`shutdown`, `reboot`, `halt`), low-level disk tools (`dd`, `mkfs`), and mass permission alterations (`chmod -R 000/777`).
      - **Actions Inspection**: Commands defined in workspace actions (`/run-action`) are pre-screened before execution.
-   - **Configurable Policies (`codeForIBMiBridge.security.policy`)**:
+   - **Configurable Policies (`code-for-ibmi-bridge.security.policy`)**:
      - `"prompt"` (Default): When a destructive command is requested, VS Code displays an interactive modal dialog to the user (`[Allow Execution] | [Reject]`). Execution halts until the user approves or the timeout expires.
      - `"block"`: All destructive commands are automatically rejected with `403 Forbidden` without prompting.
      - `"allow"`: Permissive mode allowing execution without prompt (with warning logged in the Output Channel).
-   - **Whitelist & Custom Blocklists**: Configure `codeForIBMiBridge.security.allowedCommands` to exempt specific patterns, or `codeForIBMiBridge.security.customBlockedCommands` to block custom patterns unconditionally.
-   - **Timeout Protection**: If the user does not respond within `codeForIBMiBridge.security.promptTimeoutSeconds` (default: 60s), the request times out and fails safely with `403 Forbidden`.
+   - **Whitelist & Custom Blocklists**: Configure `code-for-ibmi-bridge.security.allowedCommands` to exempt specific patterns, or `code-for-ibmi-bridge.security.customBlockedCommands` to block custom patterns unconditionally.
+   - **Timeout Protection**: If the user does not respond within `code-for-ibmi-bridge.security.promptTimeoutSeconds` (default: 60s), the request times out and fails safely with `403 Forbidden`.
+5. **QSH Execution Policy (`code-for-ibmi-bridge.security.qshPolicy`)**:
+   - External AI agents and automation scripts are strictly blocked from executing QSH commands by default (`"block"`).
+   - Any attempt to run commands in the `qsh` environment, execute workspace actions with `environment: "qsh"`, or invoke QSH through CL (`STRQSH`, `QSH CMD(...)`) is immediately intercepted and rejected with `403 Forbidden`.
+   - Four policy modes are available via dropdown in VS Code Settings:
+     - `"block"` (Default): Strictly blocks all QSH commands and QSH actions.
+     - `"prompt"`: Requires explicit agent/client confirmation (`--confirm` flag or `{ "confirm": true }`).
+     - `"modal"`: Shows an interactive VS Code popup dialog requesting approval.
+     - `"allow"`: Permits QSH execution (subject to destructive command guardrails).
+6. **CL Commands Policy (`code-for-ibmi-bridge.security.clPolicy`)**:
+   - By default (`"prompt"`), direct IBM i CL commands submitted via `/run-cl` or `/run-command` require explicit confirmation (`--confirm` flag or `{ "confirm": true }` payload) before executing.
+   - Predefined compilation and build actions (defined in `.vscode/actions.json` or Code for IBM i actions) are exempt from this requirement, ensuring regular build workflows remain streamlined while preventing unreviewed ad-hoc CL commands on the system.
+   - Four policy modes are available via dropdown in VS Code Settings:
+     - `"prompt"` (Default): Requires explicit confirmation (`--confirm`).
+     - `"block"`: Strictly blocks direct CL commands automatically.
+     - `"modal"`: Shows an interactive VS Code popup dialog requesting approval.
+     - `"allow"`: Permits direct CL execution without confirmation.
+7. **Git Bash & POSIX curl Script (`code-for-ibmi-bridge.cliMode`)**:
+   - The Bridge bundles a lightweight, zero-dependency POSIX shell script (`codefori.sh` / `codefori`) using standard `curl`.
+   - **Zero External Dependencies**: Operates completely out of the box without requiring Node.js, npm, or admin permissions on the host system.
+   - **Enterprise Security Friendly**: In locked-down enterprise environments where running custom Node wrappers or scripts triggers EDR/AppLocker blocks, Git Bash (`bash.exe` / `sh.exe`) and `curl.exe` are standard pre-approved binaries.
+   - The extension automatically mirrors `codefori` and `codefori.sh` to `~/.codefori/bin` on startup.
+   - Settings:
+     - `code-for-ibmi-bridge.cliMode`: `'auto'` (default, uses npm if installed, otherwise Git Bash / POSIX curl script), `'npm'` (forces global npm package), or `'curl'` (forces Git Bash / POSIX curl script).
 
 ---
 
@@ -152,13 +175,15 @@ HTTP/1.1 401 Unauthorized
 | `/status` | `GET` | *None* | `{ "ready": boolean, "extensionFound": boolean, "extensionActive": boolean, "tokenConfigured": boolean, "connected"?: boolean, "port"?: number, "securityPolicy"?: string }` | `500 Internal Error` |
 | `/security` | `GET` | *None* | `{ "policy": string, "promptTimeoutSeconds": number, "allowedCommands": string[], "customBlockedCommands": string[] }` | `500 Internal Error` |
 | `/activate` | `POST` | `{}` | `{ "activated": boolean, "exportedKeys": string[] }` | `404 Not Found` (Extension missing), `500` (Activation failed) |
-| `/actions` | `GET` | *None* (`?workspaceIndex=0`) | `{ "actions": Array<{ name: string, type: string, command: string, deployFirst?: boolean }> }` | `503 Service Unavailable` |
-| `/run-action` | `POST` | `{ "actionName": string, "workspaceIndex"?: number }` | `{ "success": boolean, "message"?: string, "output"?: any }` | `400 Bad Request`, `403 Forbidden` (Destructive action blocked) |
+| `/actions` | `GET` | *None* (`?workspaceIndex=0`) | `{ "actions": Array<{ name: string, type: string, command: string, deployFirst?: boolean, source?: string }> }` | `503 Service Unavailable` |
+| `/run-action` | `POST` | `{ "actionName": string, "workspaceIndex"?: number, "file"?: string, "deployMethod"?: string, "confirm"?: boolean }` | `{ "success": boolean, "message"?: string, "output"?: any }` | `400 Bad Request`, `403 Forbidden` (Destructive action blocked) |
 | `/deploy` | `POST` | `{ "workspaceIndex"?: number, "method"?: "all" \| "staged" \| "changes", "selectedFiles"?: string[] }` | `{ "success": boolean, "filesDeployed": number, "logs"?: string[] }` | `500 Internal Error` |
 | `/set-deploy-location`| `POST` | `{ "workspaceIndex"?: number, "remotePath": string }` | `{ "success": boolean, "path": string }` | `400 Bad Request` (Missing `remotePath`) |
+| `/deploy-location` | `GET` | *None* (`?workspace=0`) | `{ "success": boolean, "workspaceIndex": number, "workspaceName": string, "localPath": string, "remotePath"?: string, "configured": boolean }` | `400 Bad Request`, `500` |
 | `/connect` | `POST` | `{ "connectionName"?: string }` | `{ "success": boolean, "connectedTo": string }` | `500 Internal Error` |
 | `/disconnect` | `POST` | `{}` | `{ "success": boolean }` | `500 Internal Error` |
 | `/diagnostics` | `GET` | *None* (`?file=<path>&severity=<level>`) | `{ "count": number, "errorCount": number, "warningCount": number, "diagnostics": Array<{ file: string, line: number, column: number, severity: string, code: string, message: string }> }` | `500` |
+| `/read-eventf` | `POST` | `{ "object": string }` | `{ "count": number, "errorCount": number, "diagnostics": Array<...> }` | `400 Bad Request`, `500` |
 | `/diagnostics/clear` | `POST` | `{}` | `{ "success": boolean }` | `500` |
 | `/run-command` / `/run-cl` | `POST` | `{ "command": string, "environment"?: "ile" \| "pase" \| "qsh" }` | `{ "success": boolean, "code": number, "stdout": string, "stderr": string }` | `400 Bad Request`, `403 Forbidden` (Destructive command rejected/timeout), `500` |
 | `/exec-command` | `POST` | `{ "commandId": string, "args"?: any[] }` | `{ "success": boolean, "result": any }` | `404 Not Found` (Unknown command ID), `500` |
@@ -169,6 +194,25 @@ HTTP/1.1 401 Unauthorized
 ## 5. CLI (`codefori`) Reference
 
 The companion CLI provides human-readable formatted stdout by default and clean, machine-parsable JSON when `--json` is supplied.
+
+### Zero-Dependency Git Bash & POSIX curl Scripts
+For environments where Node.js or npm is not installed (e.g. enterprise Windows developer machines restricted by application control policies, lightweight containers, CI/CD runners, or IBM i PASE shell), zero-dependency standalone scripts are bundled in `vscode-bridge/bin/` (and automatically mirrored to `~/.codefori/bin/` on extension activation):
+- **`vscode-bridge/bin/codefori.sh`**: Portable POSIX shell script using standard `curl`. Works directly on Windows via **Git Bash**, Linux, macOS, WSL, and IBM i PASE (`/QOpenSys/usr/bin/sh`).
+- **`vscode-bridge/bin/codefori`**: Direct executable alias for POSIX shells.
+
+All tools support the exact same subcommands, flags, parameters, and auto-discovery from `~/.codefori/bridge.json`:
+```bash
+# Using Git Bash on Windows or POSIX shell on Linux/macOS
+sh ~/.codefori/bin/codefori.sh status
+sh ~/.codefori/bin/codefori.sh list-actions
+sh ~/.codefori/bin/codefori.sh run-action -n "Create Bound RPG Program (CRTBNDRPG)" -f "src/myprog.rpgle"
+sh ~/.codefori/bin/codefori.sh run-cl -c "WRKSYSSTS" --confirm
+
+# Or after adding ~/.codefori/bin to PATH:
+codefori status
+codefori list-actions
+codefori run-cl -c "WRKSYSSTS" --confirm
+```
 
 ### Configuration Precedence
 The CLI resolves connection options in strict order:
@@ -216,9 +260,13 @@ codefori list-actions --workspace 0 --json
 
 #### 3. Trigger Compilation & Custom Actions
 ```bash
-codefori run-action --name "Create Bound RPG Program (CRTBNDRPG)" --workspace 0
+# Execute compilation action (prioritizes .vscode/actions.json)
+codefori run-action --name "Create Bound RPG Program (CRTBNDRPG)"
+
+# Target a specific source file with auto-deployment
+codefori run-action --name "Create Bound RPG Program (CRTBNDRPG)" --file "src/myprog.rpgle" --deploy-method changes
 ```
-If an action requires deployment first (`deployFirst: true`), the bridge automatically triggers deployment pre-checks prior to remote compile execution.
+Actions defined in `.vscode/actions.json` take absolute precedence over connection actions. If an action requires deployment first (`deployFirst: true`), Code for IBM i automatically executes deployment before running the compile command.
 
 #### 4. Deploy Workspace Source to IFS
 ```bash
@@ -232,10 +280,16 @@ codefori deploy --workspace 0 --method all
 codefori deploy --workspace 0 --method selected --files src/FILE1.rpgle src/FILE2.rpgle
 ```
 
-#### 5. Configure Target IFS Directory
+#### 5. Inspect & Configure Target IFS Directory
 ```bash
+# Query active deployment location
+codefori get-deploy-location
+codefori get-deploy-location --workspace 0 --json
+
+# Configure target IFS deployment directory
 codefori set-deploy-location --workspace 0 --remote "/home/USER/builds/project1"
 ```
+
 
 #### 6. Connect & Disconnect Sessions
 ```bash
@@ -251,8 +305,11 @@ codefori disconnect
 
 #### 7. Inspect Compiler Diagnostics (EVFEVENT)
 ```bash
-# View all compiler errors and warnings
+# View all compiler errors and warnings parsed from EVFEVENT
 codefori diagnostics
+
+# Read and parse EVFEVENT errors for a specific object via Code for IBM i
+codefori read-eventf --object "MYLIB/MYPGM"
 
 # Filter diagnostics by file
 codefori diagnostics --file infoin0.sqlrpgle --json

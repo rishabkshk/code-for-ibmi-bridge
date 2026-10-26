@@ -16,6 +16,7 @@ export interface Action {
   refresh?: string;
   runOnProtected?: boolean;
   outputToFile?: string;
+  source?: 'workspace' | 'connection' | 'global' | 'default';
 }
 
 export interface ActionResult {

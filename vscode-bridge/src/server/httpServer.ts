@@ -13,6 +13,9 @@ export class BridgeServer {
   private adapter: CodeForIBMiAdapter;
   private onTokenResetCallback: () => Promise<string>;
   private guardrail: SecurityGuardrail;
+  private fallbackToCurl: boolean = true;
+  private fallbackScript?: string;
+  private npmFound: boolean = true;
 
   constructor(
     token: string,
@@ -24,6 +27,12 @@ export class BridgeServer {
     this.adapter = adapter;
     this.onTokenResetCallback = onTokenReset;
     this.guardrail = guardrail || new SecurityGuardrail();
+  }
+
+  public setFallbackInfo(fallbackToCurl: boolean, fallbackScript?: string, npmFound: boolean = true): void {
+    this.fallbackToCurl = fallbackToCurl;
+    this.fallbackScript = fallbackScript;
+    this.npmFound = npmFound;
   }
 
   public getGuardrail(): SecurityGuardrail {
@@ -70,7 +79,10 @@ export class BridgeServer {
           return newToken;
         },
         getPort: () => this.port,
-        guardrail: this.guardrail
+        guardrail: this.guardrail,
+        fallbackToCurl: this.fallbackToCurl,
+        fallbackScript: this.fallbackScript,
+        npmFound: this.npmFound
       };
 
       this.server = http.createServer((req, res) => {

@@ -1,6 +1,6 @@
 {
   "name": "@rishabkshk/codefori-cli",
-  "version": "0.1.1",
+  "version": "0.2.3",
   "description": "Command-line interface to programmatically interact with Code for IBM i via the VS Code Bridge.",
   "publishConfig": {
     "access": "public"

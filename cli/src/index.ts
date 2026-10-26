@@ -9,7 +9,7 @@ const program = new Command();
 program
   .name('codefori-cli')
   .description('CLI companion for Code for IBM i VS Code Extension Bridge')
-  .version('0.1.0')
+  .version('0.2.3')
   .option('--host <host>', 'Bridge server hostname (default: 127.0.0.1)')
   .option('-p, --port <port>', 'Bridge server port')
   .option('-t, --token <token>', 'Authentication token (X-CodeForIBMi-Token)')
@@ -85,12 +85,14 @@ program
   .description('Trigger compilation or custom build actions')
   .requiredOption('-n, --name <name>', 'Name of the action to execute')
   .option('-w, --workspace <index>', 'Workspace index (default: 0)')
+  .option('-f, --file <file>', 'Specific workspace source file to target (e.g. src/MYPGM.rpgle)')
+  .option('-m, --deploy-method <method>', 'Deployment method when deployFirst is enabled (changes, all, staged)')
   .option('--confirm', 'Confirm execution of potentially destructive commands')
   .action(async (options, cmd) => {
     const client = getClient(cmd);
     try {
       const ws = options.workspace !== undefined ? parseInt(options.workspace, 10) : undefined;
-      const result = await client.runAction(options.name, ws, options.confirm);
+      const result = await client.runAction(options.name, ws, options.confirm, options.file, options.deployMethod);
       Formatter.print(result, client.config.json, Formatter.formatRunActionResult);
       process.exit(result.success ? 0 : 1);
     } catch (err: any) {
@@ -106,11 +108,12 @@ program
   .option('-w, --workspace <index>', 'Workspace index (default: 0)')
   .option('-m, --method <method>', 'Deployment method: changes, all, staged, compare, selected', 'changes')
   .option('-f, --files <files...>', 'Specific files to deploy when using method "selected"')
+  .option('--confirm', 'Confirm deployment of unselected changes or blanket deploy')
   .action(async (options, cmd) => {
     const client = getClient(cmd);
     try {
       const ws = options.workspace !== undefined ? parseInt(options.workspace, 10) : undefined;
-      const result = await client.deploy(ws, options.method, options.files);
+      const result = await client.deploy(ws, options.method, options.files, options.confirm);
       Formatter.print(result, client.config.json, Formatter.formatDeployResult);
       process.exit(result.success ? 0 : 1);
     } catch (err: any) {
@@ -138,16 +141,37 @@ program
     }
   });
 
-// 7. Connect
+// 7. Get Deploy Location
+program
+  .command('get-deploy-location')
+  .alias('deploy-location')
+  .description('Display the target remote IFS deployment directory for the workspace')
+  .option('-w, --workspace <index>', 'Workspace index (default: 0)')
+  .action(async (options, cmd) => {
+    const client = getClient(cmd);
+    try {
+      const ws = options.workspace !== undefined ? parseInt(options.workspace, 10) : undefined;
+      const result = await client.getDeployLocation(ws);
+      Formatter.print(result, client.config.json, Formatter.formatGetDeployLocationResult);
+      process.exit(0);
+    } catch (err: any) {
+      Formatter.printError(err, client.config.json);
+      process.exit(1);
+    }
+  });
+
+
+// 8. Connect
 program
   .command('connect')
   .description('Connect to an IBM i host or profile')
+  .option('-c, --connection <name>', 'Connection name')
   .option('--profile <name>', 'Connection profile or system name')
   .option('--name <name>', 'Connection name')
   .action(async (options, cmd) => {
     const client = getClient(cmd);
     try {
-      const target = options.profile || options.name;
+      const target = options.connection || options.profile || options.name;
       const result = await client.connect(target);
       Formatter.print(result, client.config.json, Formatter.formatConnectResult);
       process.exit(result.success ? 0 : 1);
@@ -157,7 +181,7 @@ program
     }
   });
 
-// 8. Disconnect
+// 9. Disconnect
 program
   .command('disconnect')
   .description('Disconnect from current IBM i system')
@@ -173,7 +197,7 @@ program
     }
   });
 
-// 9. Execute Arbitrary Command
+// 10. Execute Arbitrary Command
 program
   .command('exec-command [params...]')
   .description('Execute an arbitrary VS Code command via the bridge')
@@ -209,7 +233,7 @@ program
     }
   });
 
-// 10. Diagnostics (Compiler Errors / Warnings)
+// 11. Diagnostics (Compiler Errors / Warnings)
 program
   .command('diagnostics')
   .description('Fetch active compilation errors and diagnostics from VS Code EVFEVENT parser')
@@ -235,7 +259,28 @@ program
     }
   });
 
-// 11. Run Remote Command (CL, PASE, QSH)
+// 11.1. Read EVFEVENT errors for an object via Code for IBM i
+program
+  .command('read-eventf [object]')
+  .description('Trigger Code for IBM i to read and parse EVFEVENT errors for a program or member')
+  .option('-o, --object <name>', 'Qualified object name (e.g. "MYLIB/MYPGM")')
+  .action(async (posObject, options, cmd) => {
+    const client = getClient(cmd);
+    try {
+      const obj = options.object || posObject;
+      if (!obj) {
+        throw new Error("Missing required argument: object name (e.g. 'codefori read-eventf MYLIB/MYPGM' or '--object MYLIB/MYPGM')");
+      }
+      const result = await client.readEventf(obj);
+      Formatter.print(result, client.config.json, Formatter.formatDiagnosticsResult);
+      process.exit(result.errorCount > 0 ? 1 : 0);
+    } catch (err: any) {
+      Formatter.printError(err, client.config.json);
+      process.exit(1);
+    }
+  });
+
+// 12. Run Remote Command (CL, PASE, QSH)
 program
   .command('run-command')
   .description('Execute an arbitrary CL, PASE, or QSH command directly on the connected IBM i')
@@ -255,7 +300,7 @@ program
     }
   });
 
-// 12. Run CL Command (Shortcut for ILE CL commands)
+// 13. Run CL Command (Shortcut for ILE CL commands)
 program
   .command('run-cl')
   .description('Execute a Control Language (CL) command directly on the connected IBM i')
@@ -273,7 +318,8 @@ program
     }
   });
 
-// 13. Reset Token
+// 14. Reset Token
+
 program
   .command('reset-token')
   .description('Reset the bridge authentication token')

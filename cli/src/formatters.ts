@@ -64,7 +64,13 @@ export class Formatter {
     console.log(`Token Configured:      ${status.tokenConfigured ? '\x1b[32m✔ Yes\x1b[0m' : '\x1b[31m✖ No\x1b[0m'}`);
     console.log(`Base Extension Found:  ${status.extensionFound ? '\x1b[32m✔ Installed\x1b[0m' : '\x1b[31m✖ Missing\x1b[0m'}`);
     console.log(`Base Extension Active: ${status.extensionActive ? '\x1b[32m✔ Active\x1b[0m' : '\x1b[33m✖ Inactive\x1b[0m'}`);
-    console.log(`Security Policy:       \x1b[36m${status.securityPolicy || 'prompt'}\x1b[0m`);
+    console.log(`Security Policy:       \x1b[36m${status.securityPolicy || 'prompt'}\x1b[0m (QSH: \x1b[33m${status.qshPolicy || 'block'}\x1b[0m, CL: \x1b[35m${status.clPolicy || 'prompt'}\x1b[0m)`);
+    if (status.fallbackToCurl && !status.npmFound) {
+      console.log(`CLI Mode:              \x1b[33mcurl/PowerShell Fallback\x1b[0m`);
+      if (status.fallbackScript) {
+        console.log(`Fallback Script:       \x1b[90m${status.fallbackScript}\x1b[0m`);
+      }
+    }
     
     if (!status.extensionFound) {
       console.log(`\n\x1b[33mRecommendation:\x1b[0m Install Code for IBM i via 'code --install-extension halcyontechltd.code-for-ibmi'`);
@@ -136,6 +142,17 @@ export class Formatter {
   public static formatSetDeployLocationResult(result: any): void {
     console.log(`\x1b[32m✔ Deployment location successfully configured:\x1b[0m ${result.path}`);
   }
+
+  public static formatGetDeployLocationResult(result: any): void {
+    if (result.configured && result.remotePath) {
+      console.log(`\x1b[32m✔ Remote IFS Deploy Directory:\x1b[0m \x1b[1m${result.remotePath}\x1b[0m`);
+      console.log(`  \x1b[90mLocal Workspace:\x1b[0m  ${result.localPath} (${result.workspaceName})`);
+    } else {
+      console.log(`\x1b[33m⚠️  No deployment directory configured\x1b[0m for ${result.workspaceName || 'workspace'} (${result.localPath}).`);
+      console.log(`  Use 'codefori set-deploy-location --remote <path>' to configure one.`);
+    }
+  }
+
 
   public static formatConnectResult(result: any): void {
     if (result.success) {

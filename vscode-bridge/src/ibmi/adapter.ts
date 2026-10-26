@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
+import { exec } from 'child_process';
 import { Action, ActionResult, BridgeStatus, CodeForIBMi, DeploymentMethod } from './types';
 
 export const EXTENSION_ID = 'halcyontechltd.code-for-ibmi';
@@ -76,24 +78,48 @@ export class CodeForIBMiAdapter {
     await this.ensureActive();
     const folder = this.resolveWorkspaceFolder(workspaceIndex);
     const api = this.getExportedApi();
-    const actions: Action[] = [];
 
-    // Method 1: Exported ActionTools API
+    const localActions: Action[] = [];
+    const otherActions: Action[] = [];
+
+    // 1. Priority 1: Directly read local actions from .vscode/actions.json in the workspace folder
+    if (folder) {
+      try {
+        const localActionsUri = vscode.Uri.joinPath(folder.uri, '.vscode', 'actions.json');
+        const content = await vscode.workspace.fs.readFile(localActionsUri);
+        const parsed = JSON.parse(Buffer.from(content).toString('utf-8'));
+        if (Array.isArray(parsed)) {
+          for (const item of parsed) {
+            if (item && item.name) {
+              localActions.push({
+                ...item,
+                source: 'workspace'
+              });
+            }
+          }
+        }
+      } catch {
+        // file doesn't exist or not readable, ignore
+      }
+    }
+
+    // 2. Query Code for IBM i actionTools API for workspace & connection actions
     if (api?.actionTools) {
       try {
         if (folder) {
           const workspaceActions = await api.actionTools.getActions(folder);
           if (Array.isArray(workspaceActions)) {
-            actions.push(...workspaceActions);
+            for (const wa of workspaceActions) {
+              if (!localActions.some(a => a.name.toLowerCase() === wa.name.toLowerCase())) {
+                localActions.push({ ...wa, source: 'workspace' });
+              }
+            }
           }
         }
         const connActions = api.actionTools.getConnectionActions();
         if (Array.isArray(connActions)) {
-          // Merge avoiding exact duplicates by name
           for (const ca of connActions) {
-            if (!actions.some(a => a.name === ca.name)) {
-              actions.push(ca);
-            }
+            otherActions.push({ ...ca, source: 'connection' });
           }
         }
       } catch (err) {
@@ -101,35 +127,38 @@ export class CodeForIBMiAdapter {
       }
     }
 
-    // Fallback 1: Read local actions from .vscode/actions.json
-    if (actions.length === 0 && folder) {
-      try {
-        const localActionsUri = vscode.Uri.joinPath(folder.uri, '.vscode', 'actions.json');
-        const content = await vscode.workspace.fs.readFile(localActionsUri);
-        const parsed = JSON.parse(Buffer.from(content).toString('utf-8'));
-        if (Array.isArray(parsed)) {
-          actions.push(...parsed);
-        }
-      } catch {
-        // file doesn't exist or not readable, ignore
-      }
-    }
-
-    // Fallback 2: Check global/connection settings
-    if (actions.length === 0) {
+    // 3. Fallback: Check global/connection settings if otherActions is empty
+    if (otherActions.length === 0) {
       const config = vscode.workspace.getConfiguration('code-for-ibmi');
       const connSettings = config.get<any[]>('connectionSettings') || [];
       for (const setting of connSettings) {
         if (Array.isArray(setting.actions)) {
-          actions.push(...setting.actions);
+          for (const sa of setting.actions) {
+            otherActions.push({ ...sa, source: 'connection' });
+          }
         }
       }
     }
 
-    return actions;
+    // 4. Merge: Local workspace actions ALWAYS take precedence over connection/global actions with matching name
+    const finalActions: Action[] = [...localActions];
+    for (const ca of otherActions) {
+      if (!finalActions.some(a => a.name.toLowerCase() === ca.name.toLowerCase())) {
+        finalActions.push(ca);
+      }
+    }
+
+    return finalActions;
   }
 
-  public async runAction(actionName: string, workspaceIndex?: number): Promise<ActionResult> {
+  public async runAction(
+    actionName: string,
+    workspaceIndex?: number,
+    options?: {
+      targetFile?: string;
+      deployMethod?: DeploymentMethod;
+    }
+  ): Promise<ActionResult> {
     await this.ensureActive();
     const availableActions = await this.getActions(workspaceIndex);
     const targetAction = availableActions.find(
@@ -150,16 +179,27 @@ export class CodeForIBMiAdapter {
 
     // Determine target URI to pass to code-for-ibmi.runAction
     let targetUri: vscode.Uri | undefined;
-    if (vscode.window.activeTextEditor?.document.uri) {
+    if (options?.targetFile && folder) {
+      targetUri = this.resolveSelectedFileUri(folder, options.targetFile);
+    } else if (vscode.window.activeTextEditor?.document.uri) {
       targetUri = vscode.window.activeTextEditor.document.uri;
     } else if (folder) {
-      // Find a local file or default to folder root URI
+      // Find a matching source file in the workspace or default to folder root URI
       try {
-        const files = await vscode.workspace.findFiles(new vscode.RelativePattern(folder, '**/*'), '**/node_modules/**', 1);
+        const extPattern = targetAction.extensions && targetAction.extensions.length > 0
+          ? `**/*.{${targetAction.extensions.join(',')}}`
+          : '**/*';
+        const files = await vscode.workspace.findFiles(new vscode.RelativePattern(folder, extPattern), '**/node_modules/**', 1);
         targetUri = files.length > 0 ? files[0] : folder.uri;
       } catch {
         targetUri = folder.uri;
       }
+    }
+
+    // Determine deployment method if deployFirst is true
+    let deployMethod: any = options?.deployMethod || 'changed';
+    if (deployMethod === 'changes') {
+      deployMethod = 'changed';
     }
 
     try {
@@ -169,7 +209,7 @@ export class CodeForIBMiAdapter {
         targetUri,
         undefined,
         targetAction,
-        undefined,
+        deployMethod,
         folder
       );
 
@@ -197,6 +237,37 @@ export class CodeForIBMiAdapter {
     }
   }
 
+  /**
+   * Resolves a file path (which may be workspace-relative or absolute)
+   * to a vscode.Uri relative to the specified workspace folder.
+   * - Relative paths resolve beneath the given workspace folder.
+   * - Windows drive-letter paths (C:\... or C:/...), UNC paths (\\server\share),
+   *   and POSIX paths (/foo/bar) are preserved as absolute file URIs.
+   */
+  public resolveSelectedFileUri(folder: vscode.WorkspaceFolder, filePath: string): vscode.Uri {
+    const clean = (filePath || '').trim();
+    if (!clean) {
+      throw new Error('Selected file path cannot be empty.');
+    }
+
+    // Preserve absolute paths as absolute file URIs
+    const isWindowsAbsolute = /^[a-zA-Z]:[\\\/]/.test(clean) || clean.startsWith('\\\\');
+    const isPosixAbsolute = clean.startsWith('/');
+
+    if (isWindowsAbsolute || isPosixAbsolute) {
+      return vscode.Uri.file(path.normalize(clean));
+    }
+
+    // Workspace-relative path: resolve beneath the specified workspace folder
+    const cleanRelative = clean.replace(/\\/g, '/');
+    if (folder.uri.scheme === 'file') {
+      return vscode.Uri.file(path.resolve(folder.uri.fsPath, cleanRelative));
+    }
+
+    const segments = cleanRelative.split('/').filter(p => p && p !== '.');
+    return vscode.Uri.joinPath(folder.uri, ...segments);
+  }
+
   public async deploy(options: {
     workspaceIndex?: number;
     method?: DeploymentMethod;
@@ -208,13 +279,21 @@ export class CodeForIBMiAdapter {
       throw new Error('No workspace folder found to deploy. Open a folder in VS Code first.');
     }
 
-    // Normalize method: "changes" -> "changed"
-    let normalizedMethod: any = options.method || 'all';
-    if (normalizedMethod === 'changes') {
-      normalizedMethod = 'changed';
+    const hasSelectedFiles = Array.isArray(options.selectedFiles) && options.selectedFiles.length > 0;
+
+    let normalizedMethod: any;
+    let selectedUris: vscode.Uri[] | undefined;
+
+    if (hasSelectedFiles) {
+      normalizedMethod = 'selected';
+      selectedUris = options.selectedFiles!.map(f => this.resolveSelectedFileUri(folder, f));
+    } else {
+      normalizedMethod = options.method || 'all';
+      if (normalizedMethod === 'changes') {
+        normalizedMethod = 'changed';
+      }
     }
 
-    const selectedUris = options.selectedFiles?.map(f => vscode.Uri.file(f));
     const api = this.getExportedApi();
 
     try {
@@ -252,6 +331,37 @@ export class CodeForIBMiAdapter {
     } catch (err: any) {
       throw new Error(`Deployment failed: ${err.message || String(err)}`);
     }
+  }
+
+  /**
+   * Retrieves pending modified/uncommitted/untracked files in the workspace.
+   */
+  public async getPendingChanges(workspaceIndex?: number): Promise<string[]> {
+    const folder = this.resolveWorkspaceFolder(workspaceIndex);
+    if (!folder) return [];
+
+    return new Promise<string[]>((resolve) => {
+      exec('git status --porcelain', { cwd: folder.uri.fsPath, timeout: 3000 }, (err, stdout) => {
+        if (!err && stdout) {
+          const files: string[] = [];
+          const lines = stdout.split(/\r?\n/);
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            let filePath = trimmed.substring(2).trim();
+            if (filePath.includes('->')) {
+              filePath = filePath.split('->')[1].trim();
+            }
+            filePath = filePath.replace(/^["']|["']$/g, '');
+            if (filePath) {
+              files.push(filePath);
+            }
+          }
+          return resolve(files);
+        }
+        resolve([]);
+      });
+    });
   }
 
   public async setDeployLocation(
@@ -295,6 +405,57 @@ export class CodeForIBMiAdapter {
       throw new Error(`Failed to set deploy location: ${err.message || String(err)}`);
     }
   }
+
+  public async getDeployLocation(workspaceIndex?: number): Promise<{
+    success: boolean;
+    workspaceIndex: number;
+    workspaceName: string;
+    localPath: string;
+    remotePath?: string;
+    configured: boolean;
+  }> {
+    await this.ensureActive();
+    const folder = this.resolveWorkspaceFolder(workspaceIndex);
+    if (!folder) {
+      const err: any = new Error('No workspace folder open in VS Code to inspect deployment location.');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const api = this.getExportedApi();
+    let remotePath: string | undefined;
+
+    // Method 1: Exported deployTools API
+    if (api?.deployTools?.getRemoteDeployDirectory) {
+      try {
+        remotePath = api.deployTools.getRemoteDeployDirectory(folder);
+      } catch (err) {
+        console.warn('[Bridge] api.deployTools.getRemoteDeployDirectory failed:', err);
+      }
+    }
+
+    // Method 2: Connection storage mapping
+    if (!remotePath && api?.instance?.getStorage) {
+      try {
+        const deploymentMap = api.instance.getStorage()?.getDeployment();
+        if (deploymentMap) {
+          remotePath = deploymentMap[folder.uri.fsPath];
+        }
+      } catch (err) {
+        console.warn('[Bridge] api.instance.getStorage().getDeployment failed:', err);
+      }
+    }
+
+    return {
+      success: true,
+      workspaceIndex: folder.index,
+      workspaceName: folder.name,
+      localPath: folder.uri.fsPath,
+      remotePath: remotePath || undefined,
+      configured: Boolean(remotePath)
+    };
+  }
+
 
   public async connect(connectionName?: string): Promise<{ success: boolean; connectedTo: string }> {
     await this.ensureActive();
@@ -423,6 +584,22 @@ export class CodeForIBMiAdapter {
     } catch (err: any) {
       throw new Error(`Failed to clear diagnostics: ${err.message || String(err)}`);
     }
+  }
+
+  public async readEventf(qualifiedObject: string): Promise<any> {
+    await this.ensureActive();
+    const cleanObj = (qualifiedObject || '').trim();
+    if (!cleanObj) {
+      throw new Error("Parameter 'object' (e.g. 'MYLIB/MYPGM') is required.");
+    }
+
+    try {
+      await vscode.commands.executeCommand('code-for-ibmi.openErrors', { qualifiedObject: cleanObj });
+    } catch (err: any) {
+      throw new Error(`Failed to read EVFEVENT for object '${cleanObj}': ${err.message || String(err)}`);
+    }
+
+    return this.getDiagnostics();
   }
 
   public async runRemoteCommand(

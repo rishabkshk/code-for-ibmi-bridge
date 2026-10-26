@@ -6,6 +6,9 @@ out/
 dist/
 cli/bin/
 *.tsbuildinfo
+vscode-bridge/bin/*.exe
+vscode-bridge/bin/*-bin
+cli/dist/
 
 # VS Code test and runtime data
 .vscode-test/

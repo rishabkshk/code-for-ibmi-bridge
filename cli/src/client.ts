@@ -89,17 +89,33 @@ export class BridgeClient {
     return this.request('GET', `/actions${query}`);
   }
 
-  public async runAction(actionName: string, workspaceIndex?: number, confirm?: boolean): Promise<any> {
-    return this.request('POST', '/run-action', { actionName, workspaceIndex, confirm });
+  public async runAction(
+    actionName: string,
+    workspaceIndex?: number,
+    confirm?: boolean,
+    file?: string,
+    deployMethod?: string
+  ): Promise<any> {
+    return this.request('POST', '/run-action', { actionName, workspaceIndex, confirm, file, deployMethod });
   }
 
-  public async deploy(workspaceIndex?: number, method?: string, selectedFiles?: string[]): Promise<any> {
-    return this.request('POST', '/deploy', { workspaceIndex, method, selectedFiles });
+  public async readEventf(object: string): Promise<any> {
+    return this.request('POST', '/read-eventf', { object });
+  }
+
+  public async deploy(workspaceIndex?: number, method?: string, selectedFiles?: string[], confirm?: boolean): Promise<any> {
+    return this.request('POST', '/deploy', { workspaceIndex, method, selectedFiles, confirm });
   }
 
   public async setDeployLocation(remotePath: string, workspaceIndex?: number): Promise<any> {
     return this.request('POST', '/set-deploy-location', { remotePath, workspaceIndex });
   }
+
+  public async getDeployLocation(workspaceIndex?: number): Promise<any> {
+    const query = workspaceIndex !== undefined ? `?workspaceIndex=${workspaceIndex}` : '';
+    return this.request('GET', `/deploy-location${query}`);
+  }
+
 
   public async connect(connectionName?: string): Promise<any> {
     return this.request('POST', '/connect', { connectionName });
@@ -146,6 +162,7 @@ export class BridgeClient {
       const payload = body ? JSON.stringify(body) : undefined;
       const headers: http.OutgoingHttpHeaders = {
         'X-CodeForIBMi-Token': this.config.token,
+        'X-CodeForIBMi-Client': 'codefori-cli',
         'Accept': 'application/json'
       };
 
