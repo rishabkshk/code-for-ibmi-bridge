@@ -2,7 +2,7 @@
   "name": "codefori-cli",
   "displayName": "Code for IBM i CLI",
   "description": "Programmatic bridge enabling external automation, shell scripts, and AI agents to invoke Code for IBM i actions, manage IFS deployments, and trigger builds.",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "icon": "icon.png",
   "publisher": "rishabkshk",
   "license": "MIT",
@@ -275,7 +275,7 @@
         "code-for-ibmi-bridge.generateAgentDoc": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically generate or maintain an AGENTS.md helper guide in the active workspace root for AI coding agents."
+          "description": "Prompt to create an AGENTS.md guide for AI coding agents when the Bridge server starts. If an AGENTS.md with existing guidelines is found, it is updated silently. Set to false to disable the prompt entirely."
         }
       }
     }

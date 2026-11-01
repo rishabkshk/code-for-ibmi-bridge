@@ -655,11 +655,16 @@ export async function activate(context: vscode.ExtensionContext) {
   };
 
   const generateAgentDocCmd = async () => {
+    const folders = vscode.workspace.workspaceFolders;
+    if (!folders || folders.length === 0) {
+      vscode.window.showWarningMessage('Code for IBM i Bridge: No workspace folder is open.');
+      return;
+    }
     const isNpm = await checkNpmInstalled();
     const { activeMethod } = getEffectiveCliMode(isNpm, context.extensionPath);
     const cliPath = getCliBinaryPath(context.extensionPath, activeMethod);
     const cliCmd = activeMethod === 'npm' ? 'codefori' : getCliInvocationCommand(cliPath);
-    syncAgentDoc(vscode.workspace.workspaceFolders, cliCmd);
+    syncAgentDoc(folders, cliCmd);
     vscode.window.showInformationMessage('Code for IBM i Bridge: AI Agent instructions (AGENTS.md) updated in workspace.');
   };
 
@@ -747,7 +752,7 @@ async function startBridgeServer(port: number, context: vscode.ExtensionContext)
     agentInstructions: `Always interact with Code for IBM i using the CLI command: ${cliCmd} <subcommand>. Direct raw curl/HTTP access is disabled by security guardrails.`,
     fallbackScript: cliPath
   });
-  syncAgentDoc(vscode.workspace.workspaceFolders, cliCmd);
+  promptAndSyncAgentDoc(vscode.workspace.workspaceFolders, cliCmd);
   sidebarProvider?.refresh();
 }
 
@@ -874,13 +879,71 @@ export function generateAgentDocContent(cliCmd: string): string {
   ].join('\n');
 }
 
-export function syncAgentDoc(workspaceFolders: readonly vscode.WorkspaceFolder[] | undefined, cliCmd: string): void {
+/**
+ * Checks each workspace folder and determines whether to prompt the user
+ * before creating AGENTS.md, or silently update if our markers already exist.
+ */
+async function promptAndSyncAgentDoc(workspaceFolders: readonly vscode.WorkspaceFolder[] | undefined, cliCmd: string): Promise<void> {
   const config = vscode.workspace.getConfiguration('code-for-ibmi-bridge');
   const shouldGenerate = config.get<boolean>('generateAgentDoc', true);
   if (!shouldGenerate || !workspaceFolders || workspaceFolders.length === 0) {
     return;
   }
 
+  // Check if any workspace needs a first-time creation (no existing markers)
+  const foldersNeedingPrompt: vscode.WorkspaceFolder[] = [];
+  const foldersToSilentUpdate: vscode.WorkspaceFolder[] = [];
+
+  for (const folder of workspaceFolders) {
+    const docPath = path.join(folder.uri.fsPath, 'AGENTS.md');
+    if (fs.existsSync(docPath)) {
+      const existing = fs.readFileSync(docPath, 'utf8');
+      if (existing.includes(AGENT_DOC_MARKER_START) && existing.includes(AGENT_DOC_MARKER_END)) {
+        // Our markers already exist — user previously consented; update silently
+        foldersToSilentUpdate.push(folder);
+      } else {
+        // File exists but doesn't have our markers — need consent to append
+        foldersNeedingPrompt.push(folder);
+      }
+    } else {
+      // File doesn't exist — need consent to create
+      foldersNeedingPrompt.push(folder);
+    }
+  }
+
+  // Silently update folders where user already consented
+  if (foldersToSilentUpdate.length > 0) {
+    syncAgentDoc(foldersToSilentUpdate, cliCmd);
+  }
+
+  // Prompt for folders that need first-time creation or append
+  if (foldersNeedingPrompt.length > 0) {
+    const folderNames = foldersNeedingPrompt.map(f => f.name).join(', ');
+    const choice = await vscode.window.showInformationMessage(
+      `Code for IBM i Bridge: Create AI agent guidelines (AGENTS.md) in workspace${foldersNeedingPrompt.length > 1 ? 's' : ''}: ${folderNames}?`,
+      'Yes',
+      'Not Now',
+      "Don't Ask Again"
+    );
+
+    if (choice === 'Yes') {
+      syncAgentDoc(foldersNeedingPrompt, cliCmd);
+      vscode.window.showInformationMessage('Code for IBM i Bridge: AGENTS.md created in workspace.');
+    } else if (choice === "Don't Ask Again") {
+      await config.update('generateAgentDoc', false, vscode.ConfigurationTarget.Global);
+      outputChannel?.appendLine('[Agent Doc] User chose to disable automatic AGENTS.md generation.');
+    }
+    // 'Not Now' — do nothing this session
+  }
+}
+
+/**
+ * Writes or updates AGENTS.md in the given workspace folders.
+ * If the file already exists with our markers, the marked section is replaced in-place.
+ * If the file exists without markers, the content is appended.
+ * If the file does not exist, it is created.
+ */
+export function syncAgentDoc(workspaceFolders: readonly vscode.WorkspaceFolder[], cliCmd: string): void {
   const guideBody = generateAgentDocContent(cliCmd);
   const blockContent = `${AGENT_DOC_MARKER_START}\n${guideBody}\n${AGENT_DOC_MARKER_END}\n`;
 
@@ -893,10 +956,12 @@ export function syncAgentDoc(workspaceFolders: readonly vscode.WorkspaceFolder[]
         const endIndex = existing.indexOf(AGENT_DOC_MARKER_END);
 
         if (startIndex !== -1 && endIndex !== -1 && endIndex > startIndex) {
+          // Replace existing marked section in-place
           const before = existing.substring(0, startIndex);
           const after = existing.substring(endIndex + AGENT_DOC_MARKER_END.length);
           fs.writeFileSync(docPath, `${before}${blockContent.trim()}${after}`, 'utf8');
         } else {
+          // Append to existing file
           const separator = existing.endsWith('\n\n') ? '' : existing.endsWith('\n') ? '\n' : '\n\n';
           fs.writeFileSync(docPath, `${existing}${separator}${blockContent}`, 'utf8');
         }
