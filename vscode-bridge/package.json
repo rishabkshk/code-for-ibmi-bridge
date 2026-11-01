@@ -2,7 +2,7 @@
   "name": "codefori-cli",
   "displayName": "Code for IBM i CLI",
   "description": "Programmatic bridge enabling external automation, shell scripts, and AI agents to invoke Code for IBM i actions, manage IFS deployments, and trigger builds.",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "icon": "icon.png",
   "publisher": "rishabkshk",
   "license": "MIT",
