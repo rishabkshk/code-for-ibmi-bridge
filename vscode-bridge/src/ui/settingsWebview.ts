@@ -15,9 +15,10 @@ export class SettingsWebviewPanel {
     onResetToken: () => Promise<string>,
     onStartServer: () => Promise<void>,
     onStopServer: () => Promise<void>,
-    getEffectiveCliMode: (npmInstalled: boolean) => { mode: string; activeMethod: string },
+    getEffectiveCliMode: (npmInstalled: boolean, cliGlobalInstalled?: boolean) => { mode: string; activeMethod: string },
     checkNpmInstalled: () => Promise<boolean>,
-    getFallbackScriptPath: () => string
+    getFallbackScriptPath: () => string,
+    checkCodeforiGlobalInstalled?: () => Promise<boolean>
   ) {
     const column = vscode.window.activeTextEditor
       ? vscode.window.activeTextEditor.viewColumn
@@ -50,7 +51,8 @@ export class SettingsWebviewPanel {
       onStopServer,
       getEffectiveCliMode,
       checkNpmInstalled,
-      getFallbackScriptPath
+      getFallbackScriptPath,
+      checkCodeforiGlobalInstalled
     );
   }
 
@@ -62,9 +64,10 @@ export class SettingsWebviewPanel {
     private onResetToken: () => Promise<string>,
     private onStartServer: () => Promise<void>,
     private onStopServer: () => Promise<void>,
-    private getEffectiveCliMode: (npmInstalled: boolean) => { mode: string; activeMethod: string },
+    private getEffectiveCliMode: (npmInstalled: boolean, cliGlobalInstalled?: boolean) => { mode: string; activeMethod: string },
     private checkNpmInstalled: () => Promise<boolean>,
-    private getFallbackScriptPath: () => string
+    private getFallbackScriptPath: () => string,
+    private checkCodeforiGlobalInstalled?: () => Promise<boolean>
   ) {
     this.panel = panel;
     this.extensionUri = extensionUri;
@@ -127,6 +130,10 @@ export class SettingsWebviewPanel {
             vscode.commands.executeCommand('codeForIBMiBridge.installNpmCli');
             break;
           }
+          case 'generateAgentDoc': {
+            vscode.commands.executeCommand('codeForIBMiBridge.generateAgentDoc');
+            break;
+          }
           case 'refresh': {
             this.refresh();
             break;
@@ -162,19 +169,20 @@ export class SettingsWebviewPanel {
     }
   }
 
-  private buildPayloadSync(isNpm: boolean) {
+  private buildPayloadSync(isNpm: boolean, isCli: boolean = false) {
     const isRunning = this.bridgeServer?.isRunning() ?? false;
     const host = this.bridgeServer?.getHost() ?? '127.0.0.1';
     const port = this.bridgeServer?.getPort() ?? 0;
     const token = this.bridgeServer?.getToken() ?? '';
     const secConfig = this.getSecurityConfig();
-    const { mode: cliMode, activeMethod } = this.getEffectiveCliMode(isNpm);
+    const { mode: cliMode, activeMethod } = this.getEffectiveCliMode(isNpm, isCli);
     const fallbackScript = this.getFallbackScriptPath();
 
     const config = vscode.workspace.getConfiguration('code-for-ibmi-bridge');
     const autoStart = config.get<boolean>('autoStart', true);
     const configuredPort = config.get<number>('port', 0);
     const promptOnMissingNpm = config.get<boolean>('promptOnMissingNpm', false);
+    const generateAgentDoc = config.get<boolean>('generateAgentDoc', true);
 
     return {
       isRunning,
@@ -186,8 +194,10 @@ export class SettingsWebviewPanel {
       cliMode,
       activeMethod,
       isNpm,
+      isCli,
       fallbackScript,
       promptOnMissingNpm,
+      generateAgentDoc,
       secConfig
     };
   }
@@ -195,7 +205,8 @@ export class SettingsWebviewPanel {
   private async update() {
     try {
       const isNpm = await this.checkNpmInstalled();
-      const payload = this.buildPayloadSync(isNpm);
+      const isCli = this.checkCodeforiGlobalInstalled ? await this.checkCodeforiGlobalInstalled() : false;
+      const payload = this.buildPayloadSync(isNpm, isCli);
       this.panel.webview.postMessage({ command: 'syncState', data: payload });
     } catch {
       // Non-fatal sync fallback
@@ -212,8 +223,10 @@ export class SettingsWebviewPanel {
     cliMode: string;
     activeMethod: string;
     isNpm: boolean;
+    isCli: boolean;
     fallbackScript: string;
     promptOnMissingNpm: boolean;
+    generateAgentDoc: boolean;
     secConfig: SecurityConfig;
   }): string {
     const nonce = getNonce();
@@ -631,6 +644,23 @@ export class SettingsWebviewPanel {
             </div>
           </div>
         </div>
+
+        <div class="setting-card">
+          <div class="setting-header">
+            <div class="setting-info">
+              <label class="checkbox-container">
+                <input type="checkbox" id="check-generate-agent-doc" ${data.generateAgentDoc ? 'checked' : ''}>
+                <span class="setting-label">Maintain AI Agent Guidelines (AGENTS.md)</span>
+              </label>
+              <div class="setting-desc">Prompt to create and maintain an AGENTS.md guide in workspace roots containing .vscode/actions.json with safe development workflows and guardrails for AI coding assistants.</div>
+              <div style="margin-top: 10px;">
+                <button type="button" id="btn-generate-agent-doc" class="btn btn-secondary">
+                  📖 Generate / Update AGENTS.md Now
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="section">
@@ -959,6 +989,7 @@ export class SettingsWebviewPanel {
         'code-for-ibmi-bridge.autoStart': document.getElementById('check-autostart').checked,
         'code-for-ibmi-bridge.cliMode': document.getElementById('select-climode').value,
         'code-for-ibmi-bridge.promptOnMissingNpm': document.getElementById('check-prompt-npm').checked,
+        'code-for-ibmi-bridge.generateAgentDoc': document.getElementById('check-generate-agent-doc').checked,
         'code-for-ibmi-bridge.security.policy': document.getElementById('select-policy').value,
         'code-for-ibmi-bridge.security.qshPolicy': document.getElementById('select-qsh').value,
         'code-for-ibmi-bridge.security.pasePolicy': document.getElementById('select-pase').value,
@@ -1045,6 +1076,11 @@ export class SettingsWebviewPanel {
       btnInstallNpm.addEventListener('click', () => sendMessage('installNpmCli'));
     }
 
+    const btnGenerateAgent = document.getElementById('btn-generate-agent-doc');
+    if (btnGenerateAgent) {
+      btnGenerateAgent.addEventListener('click', () => sendMessage('generateAgentDoc'));
+    }
+
     const btnCopyEnv = document.getElementById('btn-copy-env');
     if (btnCopyEnv) {
       btnCopyEnv.addEventListener('click', () => {
@@ -1079,6 +1115,7 @@ export class SettingsWebviewPanel {
           setCheck('check-autostart', d.autoStart);
           setVal('select-climode', d.cliMode);
           setCheck('check-prompt-npm', d.promptOnMissingNpm);
+          setCheck('check-generate-agent-doc', d.generateAgentDoc);
           setVal('select-policy', d.secConfig?.policy || 'prompt');
           setVal('select-qsh', d.secConfig?.qshPolicy || 'block');
           setVal('select-pase', d.secConfig?.pasePolicy || 'block');

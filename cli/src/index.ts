@@ -6,10 +6,17 @@ import { Formatter } from './formatters';
 
 const program = new Command();
 
+let cliVersion = '0.2.6';
+try {
+  cliVersion = require('../package.json').version || '0.2.6';
+} catch {
+  // fallback
+}
+
 program
   .name('codefori-cli')
   .description('CLI companion for Code for IBM i VS Code Extension Bridge')
-  .version('0.2.3')
+  .version(cliVersion)
   .option('--host <host>', 'Bridge server hostname (default: 127.0.0.1)')
   .option('-p, --port <port>', 'Bridge server port')
   .option('-t, --token <token>', 'Authentication token (X-CodeForIBMi-Token)')

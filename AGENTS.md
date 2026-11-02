@@ -1,4 +1,10 @@
 <!-- CODEFORI_GUIDE_START -->
+<!--
+  NOTE: The section between CODEFORI_GUIDE_START and CODEFORI_GUIDE_END is
+  automatically maintained by Code for IBM i Bridge.
+  Any custom instructions, rules, or guidelines should be placed ABOVE or BELOW
+  these markers, as the content between them is updated automatically.
+-->
 # Code for IBM i Bridge — AI Coding Agent Guidelines
 
 This repository uses the **Code for IBM i Bridge** extension. The intended development model is **local development** in VS Code, followed by **deploying, compiling, and testing on the remote IBM i system** through the bridge CLI (`codefori`).

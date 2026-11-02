@@ -9,8 +9,9 @@ export class BridgeSidebarProvider implements vscode.TreeDataProvider<BridgeTree
   constructor(
     private bridgeServer: BridgeServer | undefined,
     private getSecurityConfig: () => SecurityConfig,
-    private getEffectiveCliMode: (npmInstalled: boolean) => { mode: string; activeMethod: string },
-    private checkNpmInstalled: () => Promise<boolean>
+    private getEffectiveCliMode: (npmInstalled: boolean, cliGlobalInstalled?: boolean) => { mode: string; activeMethod: string },
+    private checkNpmInstalled: () => Promise<boolean>,
+    private checkCodeforiGlobalInstalled?: () => Promise<boolean>
   ) {}
 
   public refresh(): void {
@@ -56,7 +57,8 @@ export class BridgeSidebarProvider implements vscode.TreeDataProvider<BridgeTree
 
     if (element.contextValue === 'cli-group') {
       const isNpm = await this.checkNpmInstalled();
-      const { mode, activeMethod } = this.getEffectiveCliMode(isNpm);
+      const isCli = this.checkCodeforiGlobalInstalled ? await this.checkCodeforiGlobalInstalled() : false;
+      const { mode, activeMethod } = this.getEffectiveCliMode(isNpm, isCli);
       return [
         new BridgeTreeItem(
           `Mode: ${mode}`,
@@ -95,6 +97,14 @@ export class BridgeSidebarProvider implements vscode.TreeDataProvider<BridgeTree
           new vscode.ThemeIcon('gear'),
           'Open dedicated settings page',
           { command: 'codeForIBMiBridge.openSettings', title: 'Open Settings' }
+        ),
+        new BridgeTreeItem(
+          'Generate AI Agent Instructions',
+          vscode.TreeItemCollapsibleState.None,
+          'action-generate-agent-doc',
+          new vscode.ThemeIcon('book'),
+          'Generate or update AGENTS.md in workspace',
+          { command: 'codeForIBMiBridge.generateAgentDoc', title: 'Generate AI Agent Instructions (AGENTS.md)' }
         ),
         new BridgeTreeItem(
           'Copy CLI Command',

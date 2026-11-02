@@ -146,10 +146,26 @@ function getCliBinaryPath(extensionPath: string, activeMethod?: 'npm' | 'curl'):
 }
 
 function getCliInvocationCommand(binaryPath: string): string {
-  return `"${binaryPath}"`;
+  // Normalize Windows backslashes to forward slashes for Git Bash / POSIX compatibility
+  const normalized = binaryPath.replace(/\\/g, '/');
+  return `"${normalized}"`;
 }
 
-function getEffectiveCliMode(npmInstalled: boolean, extensionPath?: string): { mode: 'auto' | 'npm' | 'curl'; activeMethod: 'npm' | 'curl' } {
+function getDocCliCommand(activeMethod: 'npm' | 'curl'): string {
+  if (activeMethod === 'npm') {
+    return 'codefori';
+  }
+  // Portable across all OS and user home directories in Git Bash / POSIX shells:
+  // ~/.codefori/bin/codefori.sh resolves dynamically to the user's home directory
+  // without hardcoding machine-specific user paths (e.g. C:\Users\<Username>\...) into AGENTS.md
+  return '~/.codefori/bin/codefori.sh';
+}
+
+function getEffectiveCliMode(
+  npmInstalled: boolean,
+  cliGlobalInstalled: boolean = false,
+  extensionPath?: string
+): { mode: 'auto' | 'npm' | 'curl'; activeMethod: 'npm' | 'curl' } {
   const config = vscode.workspace.getConfiguration('code-for-ibmi-bridge');
   const configuredMode = config.get<'auto' | 'npm' | 'curl'>('cliMode', 'auto');
 
@@ -160,8 +176,8 @@ function getEffectiveCliMode(npmInstalled: boolean, extensionPath?: string): { m
     return { mode: 'npm', activeMethod: 'npm' };
   }
 
-  // 'auto' mode: prefer npm if globally installed; otherwise Git Bash / POSIX curl script
-  if (npmInstalled) {
+  // 'auto' mode: prefer npm package ONLY if it is actually installed globally; otherwise Git Bash / POSIX curl script
+  if (npmInstalled && cliGlobalInstalled) {
     return { mode: 'auto', activeMethod: 'npm' };
   }
   return { mode: 'auto', activeMethod: 'curl' };
@@ -326,7 +342,7 @@ export async function activate(context: vscode.ExtensionContext) {
   const npmInstalled = await checkNpmInstalled();
   const cliGlobalInstalled = npmInstalled ? await checkCodeforiGlobalInstalled(context.extensionPath) : false;
   const bridgeConfig = vscode.workspace.getConfiguration('code-for-ibmi-bridge');
-  const { mode: cliMode, activeMethod } = getEffectiveCliMode(npmInstalled, context.extensionPath);
+  const { mode: cliMode, activeMethod } = getEffectiveCliMode(npmInstalled, cliGlobalInstalled, context.extensionPath);
   const promptOnMissingNpm = bridgeConfig.get<boolean>('promptOnMissingNpm', true);
   const cliBinaryPath = getCliBinaryPath(context.extensionPath, activeMethod);
 
@@ -423,7 +439,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
   const copyCurlCommandCmd = async () => {
     const isNpm = await checkNpmInstalled();
-    const { activeMethod } = getEffectiveCliMode(isNpm, context.extensionPath);
+    const isCli = isNpm ? await checkCodeforiGlobalInstalled(context.extensionPath) : false;
+    const { activeMethod } = getEffectiveCliMode(isNpm, isCli, context.extensionPath);
     let cmd = 'codefori status';
     if (activeMethod === 'curl') {
       const cliPath = getCliBinaryPath(context.extensionPath, 'curl');
@@ -465,7 +482,8 @@ export async function activate(context: vscode.ExtensionContext) {
     if (selected) {
       await config.update('cliMode', selected.id, vscode.ConfigurationTarget.Global);
       const isNpm = await checkNpmInstalled();
-      const { activeMethod: newMethod } = getEffectiveCliMode(isNpm, context.extensionPath);
+      const isCli = isNpm ? await checkCodeforiGlobalInstalled(context.extensionPath) : false;
+      const { activeMethod: newMethod } = getEffectiveCliMode(isNpm, isCli, context.extensionPath);
       const { homeBinDir, extBinDir } = syncCliScripts(context.extensionPath, newMethod);
       updateTerminalPath(context, newMethod, homeBinDir, extBinDir);
       vscode.window.showInformationMessage(`Code for IBM i Bridge: CLI mode set to '${selected.id}'.`);
@@ -566,7 +584,8 @@ export async function activate(context: vscode.ExtensionContext) {
       async () => { await stopCmd(); sidebarProvider?.refresh(); },
       getEffectiveCliMode,
       checkNpmInstalled,
-      () => getCliBinaryPath(context.extensionPath)
+      () => getCliBinaryPath(context.extensionPath),
+      () => checkCodeforiGlobalInstalled(context.extensionPath)
     );
   };
 
@@ -574,7 +593,8 @@ export async function activate(context: vscode.ExtensionContext) {
     bridgeServer,
     getSecurityConfig,
     getEffectiveCliMode,
-    checkNpmInstalled
+    checkNpmInstalled,
+    () => checkCodeforiGlobalInstalled(context.extensionPath)
   );
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider('codeForIBMiBridge.sidebar', sidebarProvider)
@@ -599,7 +619,8 @@ export async function activate(context: vscode.ExtensionContext) {
     const extActive = adapter.isActive();
     const secConfig = getSecurityConfig();
     const isNpm = await checkNpmInstalled();
-    const { mode: configuredCliMode, activeMethod } = getEffectiveCliMode(isNpm, context.extensionPath);
+    const isCli = isNpm ? await checkCodeforiGlobalInstalled(context.extensionPath) : false;
+    const { mode: configuredCliMode, activeMethod } = getEffectiveCliMode(isNpm, isCli, context.extensionPath);
     const cliPath = getCliBinaryPath(context.extensionPath, activeMethod);
     let cliCmd = 'codefori';
     if (activeMethod === 'curl') {
@@ -661,10 +682,55 @@ export async function activate(context: vscode.ExtensionContext) {
       return;
     }
     const isNpm = await checkNpmInstalled();
-    const { activeMethod } = getEffectiveCliMode(isNpm, context.extensionPath);
-    const cliPath = getCliBinaryPath(context.extensionPath, activeMethod);
-    const cliCmd = activeMethod === 'npm' ? 'codefori' : getCliInvocationCommand(cliPath);
-    syncAgentDoc(folders, cliCmd);
+    const isCli = isNpm ? await checkCodeforiGlobalInstalled(context.extensionPath) : false;
+    const { activeMethod } = getEffectiveCliMode(isNpm, isCli, context.extensionPath);
+    const docCliCmd = getDocCliCommand(activeMethod);
+
+    // Filter folders or prompt if .vscode/actions.json is absent
+    const targetFolders: vscode.WorkspaceFolder[] = [];
+    for (const folder of folders) {
+      const actionsPath = path.join(folder.uri.fsPath, '.vscode', 'actions.json');
+      if (!fs.existsSync(actionsPath)) {
+        const choice = await vscode.window.showWarningMessage(
+          `No .vscode/actions.json was found in workspace "${folder.name}". Generate AGENTS.md anyway?`,
+          'Generate Anyway',
+          'Skip'
+        );
+        if (choice !== 'Generate Anyway') {
+          continue;
+        }
+      }
+      targetFolders.push(folder);
+    }
+
+    if (targetFolders.length === 0) {
+      return;
+    }
+
+    // If existing AGENTS.md has custom modifications inside markers, confirm before overwriting
+    for (const folder of targetFolders) {
+      const docPath = path.join(folder.uri.fsPath, 'AGENTS.md');
+      if (fs.existsSync(docPath)) {
+        const existing = fs.readFileSync(docPath, 'utf8');
+        const startIndex = existing.indexOf(AGENT_DOC_MARKER_START);
+        const endIndex = existing.indexOf(AGENT_DOC_MARKER_END);
+        if (startIndex !== -1 && endIndex !== -1 && endIndex > startIndex) {
+          const innerContent = existing.substring(startIndex + AGENT_DOC_MARKER_START.length, endIndex).trim();
+          if (detectCustomEdits(innerContent, docCliCmd)) {
+            const confirm = await vscode.window.showWarningMessage(
+              `Custom instructions were detected inside the Code for IBM i section in AGENTS.md (${folder.name}). Overwrite with latest template?`,
+              { modal: true },
+              'Overwrite'
+            );
+            if (confirm !== 'Overwrite') {
+              return;
+            }
+          }
+        }
+      }
+    }
+
+    syncAgentDoc(targetFolders, docCliCmd);
     vscode.window.showInformationMessage('Code for IBM i Bridge: AI Agent instructions (AGENTS.md) updated in workspace.');
   };
 
@@ -740,9 +806,11 @@ async function startBridgeServer(port: number, context: vscode.ExtensionContext)
 
   // Write discoverable bridge state for CLI auto-handshake
   const isNpm = await checkNpmInstalled();
-  const { mode: configuredCliMode, activeMethod: currentActiveMethod } = getEffectiveCliMode(isNpm, context.extensionPath);
+  const isCli = isNpm ? await checkCodeforiGlobalInstalled(context.extensionPath) : false;
+  const { mode: configuredCliMode, activeMethod: currentActiveMethod } = getEffectiveCliMode(isNpm, isCli, context.extensionPath);
   const cliPath = getCliBinaryPath(context.extensionPath, currentActiveMethod);
   const cliCmd = currentActiveMethod === 'npm' ? 'codefori' : getCliInvocationCommand(cliPath);
+  const docCliCmd = getDocCliCommand(currentActiveMethod);
   writeBridgeStateFile(host, activePort, token, {
     cliMode: configuredCliMode,
     activeMethod: currentActiveMethod,
@@ -752,7 +820,7 @@ async function startBridgeServer(port: number, context: vscode.ExtensionContext)
     agentInstructions: `Always interact with Code for IBM i using the CLI command: ${cliCmd} <subcommand>. Direct raw curl/HTTP access is disabled by security guardrails.`,
     fallbackScript: cliPath
   });
-  promptAndSyncAgentDoc(vscode.workspace.workspaceFolders, cliCmd);
+  promptAndSyncAgentDoc(vscode.workspace.workspaceFolders, docCliCmd);
   sidebarProvider?.refresh();
 }
 
@@ -815,11 +883,53 @@ function removeBridgeStateFile(): void {
 const AGENT_DOC_MARKER_START = '<!-- CODEFORI_GUIDE_START -->';
 const AGENT_DOC_MARKER_END = '<!-- CODEFORI_GUIDE_END -->';
 
+/**
+ * Checks whether the existing content between markers has been customized by the user.
+ */
+function detectCustomEdits(existingSection: string, cliCmd: string): boolean {
+  const normalized = existingSection.replace(/\r\n/g, '\n').trim();
+  const currentExpected = generateAgentDocContent(cliCmd).trim();
+  if (normalized.includes(currentExpected)) {
+    return false;
+  }
+
+  const standardHeaders = [
+    '# Code for IBM i Bridge',
+    '## Prerequisites',
+    '## Workspace Actions & `.vscode/actions.json`',
+    '## Standard Development & Test Lifecycle',
+    '## Critical Rules & Guardrails',
+    '## Quick Reference'
+  ];
+
+  // If user added custom markdown headings inside the markers, it's customized
+  const headers = normalized.match(/^#{1,4}\s+.+$/gm) || [];
+  const hasUnknownHeaders = headers.some(h => !standardHeaders.some(sh => h.trim().startsWith(sh)));
+  if (hasUnknownHeaders) {
+    return true;
+  }
+
+  // If line count differs significantly from expected template, user made custom changes
+  const existingLineCount = normalized.split('\n').filter(l => l.trim().length > 0).length;
+  const expectedLineCount = currentExpected.split('\n').filter(l => l.trim().length > 0).length;
+  if (Math.abs(existingLineCount - expectedLineCount) > 8) {
+    return true;
+  }
+
+  return false;
+}
+
 export function generateAgentDocContent(cliCmd: string): string {
   return [
+    `<!--`,
+    `  NOTE: The section between CODEFORI_GUIDE_START and CODEFORI_GUIDE_END is`,
+    `  automatically maintained by Code for IBM i Bridge.`,
+    `  Any custom instructions, rules, or guidelines should be placed ABOVE or BELOW`,
+    `  these markers, as the content between them is updated automatically.`,
+    `-->`,
     `# Code for IBM i Bridge — AI Coding Agent Guidelines`,
     ``,
-    `This repository uses the **Code for IBM i Bridge** extension. The intended development model is **local development** in VS Code, followed by **deploying, compiling, and testing on the remote IBM i system** through the bridge CLI (\`codefori\`).`,
+    `This repository uses the **Code for IBM i Bridge** extension. The intended development model is **local development** in VS Code, followed by **deploying, compiling, and testing on the remote IBM i system** through the bridge CLI (\`${cliCmd}\`).`,
     ``,
     `## Prerequisites`,
     `- **Git Bash (Windows)**: When running on Windows, all CLI commands **MUST** be executed within Git Bash (\`bash.exe\` / \`sh.exe\`). Do NOT execute the curl runner script in PowerShell or CMD.`,
@@ -890,19 +1000,42 @@ async function promptAndSyncAgentDoc(workspaceFolders: readonly vscode.Workspace
     return;
   }
 
-  // Check if any workspace needs a first-time creation (no existing markers)
+  const expectedContent = generateAgentDocContent(cliCmd).trim();
   const foldersNeedingPrompt: vscode.WorkspaceFolder[] = [];
   const foldersToSilentUpdate: vscode.WorkspaceFolder[] = [];
+  const foldersWithCustomEdits: vscode.WorkspaceFolder[] = [];
 
   for (const folder of workspaceFolders) {
+    const actionsPath = path.join(folder.uri.fsPath, '.vscode', 'actions.json');
+    if (!fs.existsSync(actionsPath)) {
+      // Automatic generation is only performed for IBM i workspaces containing .vscode/actions.json
+      continue;
+    }
+
     const docPath = path.join(folder.uri.fsPath, 'AGENTS.md');
     if (fs.existsSync(docPath)) {
       const existing = fs.readFileSync(docPath, 'utf8');
-      if (existing.includes(AGENT_DOC_MARKER_START) && existing.includes(AGENT_DOC_MARKER_END)) {
-        // Our markers already exist — user previously consented; update silently
-        foldersToSilentUpdate.push(folder);
+      const startIndex = existing.indexOf(AGENT_DOC_MARKER_START);
+      const endIndex = existing.indexOf(AGENT_DOC_MARKER_END);
+
+      if (startIndex !== -1 && endIndex !== -1 && endIndex > startIndex) {
+        const innerContent = existing.substring(startIndex + AGENT_DOC_MARKER_START.length, endIndex).trim();
+        const normalizedInner = innerContent.replace(/\r\n/g, '\n');
+
+        // 1. If already identical to current expected content, do nothing!
+        if (normalizedInner === expectedContent) {
+          continue;
+        }
+
+        // 2. If it has custom edits by the user, don't silently overwrite
+        if (detectCustomEdits(innerContent, cliCmd)) {
+          foldersWithCustomEdits.push(folder);
+        } else {
+          // Standard content from older version or CLI mode changed; safe to update
+          foldersToSilentUpdate.push(folder);
+        }
       } else {
-        // File exists but doesn't have our markers — need consent to append
+        // File exists but does not have valid markers — need consent to append
         foldersNeedingPrompt.push(folder);
       }
     } else {
@@ -911,9 +1044,28 @@ async function promptAndSyncAgentDoc(workspaceFolders: readonly vscode.Workspace
     }
   }
 
-  // Silently update folders where user already consented
+  // Silently update folders where markers exist and no custom user edits were made
   if (foldersToSilentUpdate.length > 0) {
     syncAgentDoc(foldersToSilentUpdate, cliCmd);
+  }
+
+  // If custom edits are detected inside the managed markers, ask before overwriting
+  for (const folder of foldersWithCustomEdits) {
+    const choice = await vscode.window.showWarningMessage(
+      `Code for IBM i Bridge: Custom instructions were detected inside the Code for IBM i section in AGENTS.md (${folder.name}). Overwrite with latest template or keep your customizations?`,
+      'Keep Customizations',
+      'Overwrite',
+      "Don't Ask Again"
+    );
+
+    if (choice === 'Overwrite') {
+      syncAgentDoc([folder], cliCmd);
+      vscode.window.showInformationMessage(`Code for IBM i Bridge: AGENTS.md updated in ${folder.name}. Custom rules can be added outside the markers.`);
+    } else if (choice === "Don't Ask Again") {
+      await config.update('generateAgentDoc', false, vscode.ConfigurationTarget.Global);
+      outputChannel?.appendLine('[Agent Doc] User chose to disable automatic AGENTS.md generation.');
+    }
+    // If 'Keep Customizations' or dismissed: do nothing, preserve user changes!
   }
 
   // Prompt for folders that need first-time creation or append
@@ -952,21 +1104,53 @@ export function syncAgentDoc(workspaceFolders: readonly vscode.WorkspaceFolder[]
     try {
       if (fs.existsSync(docPath)) {
         const existing = fs.readFileSync(docPath, 'utf8');
+        const eol = existing.includes('\r\n') ? '\r\n' : '\n';
         const startIndex = existing.indexOf(AGENT_DOC_MARKER_START);
         const endIndex = existing.indexOf(AGENT_DOC_MARKER_END);
 
         if (startIndex !== -1 && endIndex !== -1 && endIndex > startIndex) {
-          // Replace existing marked section in-place
-          const before = existing.substring(0, startIndex);
-          const after = existing.substring(endIndex + AGENT_DOC_MARKER_END.length);
-          fs.writeFileSync(docPath, `${before}${blockContent.trim()}${after}`, 'utf8');
+          // Check if already up to date
+          const existingSection = existing.substring(startIndex, endIndex + AGENT_DOC_MARKER_END.length);
+          if (existingSection.replace(/\r\n/g, '\n') === blockContent.trim().replace(/\r\n/g, '\n')) {
+            outputChannel?.appendLine(`[Agent Doc] AGENTS.md already up to date at ${docPath}`);
+            continue;
+          }
+
+          let before = existing.substring(0, startIndex);
+          let after = existing.substring(endIndex + AGENT_DOC_MARKER_END.length);
+
+          // Clean up spacing around replaced block
+          if (before.trim().length > 0) {
+            before = before.trimEnd() + eol + eol;
+          } else {
+            before = '';
+          }
+          if (after.trim().length > 0) {
+            after = eol + eol + after.trimStart();
+          } else {
+            after = '';
+          }
+
+          const formattedBlock = (eol === '\r\n')
+            ? blockContent.trim().replace(/\n/g, '\r\n')
+            : blockContent.trim();
+
+          const result = `${before}${formattedBlock}${after}`.trimEnd() + eol;
+          fs.writeFileSync(docPath, result, 'utf8');
         } else {
-          // Append to existing file
-          const separator = existing.endsWith('\n\n') ? '' : existing.endsWith('\n') ? '\n' : '\n\n';
-          fs.writeFileSync(docPath, `${existing}${separator}${blockContent}`, 'utf8');
+          // Append to existing file with proper blank lines
+          const formattedBlock = (eol === '\r\n')
+            ? blockContent.trim().replace(/\n/g, '\r\n')
+            : blockContent.trim();
+          const prefix = existing.trim().length > 0 ? existing.trimEnd() + eol + eol : '';
+          fs.writeFileSync(docPath, `${prefix}${formattedBlock}${eol}`, 'utf8');
         }
       } else {
-        fs.writeFileSync(docPath, blockContent, 'utf8');
+        const eol = process.platform === 'win32' ? '\r\n' : '\n';
+        const formattedBlock = (eol === '\r\n')
+          ? blockContent.trim().replace(/\n/g, '\r\n')
+          : blockContent.trim();
+        fs.writeFileSync(docPath, `${formattedBlock}${eol}`, 'utf8');
       }
       outputChannel?.appendLine(`[Agent Doc] Synchronized AGENTS.md at ${docPath}`);
     } catch (err: any) {
