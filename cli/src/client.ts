@@ -145,6 +145,18 @@ export class BridgeClient {
     return this.request('POST', '/run-command', { command, environment, cwd, confirm });
   }
 
+  public async runSql(
+    query: string,
+    options?: { rows?: number; bindings?: any[]; confirm?: boolean }
+  ): Promise<any> {
+    return this.request('POST', '/run-sql', {
+      query,
+      rows: options?.rows,
+      bindings: options?.bindings,
+      confirm: options?.confirm
+    });
+  }
+
   public async resetToken(): Promise<any> {
     return this.request('POST', '/token/reset');
   }

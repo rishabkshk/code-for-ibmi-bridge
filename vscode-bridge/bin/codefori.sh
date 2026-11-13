@@ -66,6 +66,11 @@ Commands:
   run-cl                 Execute an IBM i CL command (prompts/requires --confirm by default)
                          Options: -c, --command <cmd> (required)
                                   --confirm
+  run-sql                Execute an SQL statement or query
+                         Options: -q, --query <sql>
+                                  -f, --file <path>
+                                  -r, --rows <number>
+                                  --confirm
   run-command            Execute arbitrary CL or PASE command
                          Options: -c, --command <cmd> (required)
                                   -e, --env <env> (ile, pase)
@@ -96,7 +101,7 @@ while [ $# -gt 0 ]; do
       JSON_OUTPUT=1; shift ;;
     -h|--help)
       usage ;;
-    status|list-actions|run-action|deploy|get-deploy-location|set-deploy-location|diagnostics|read-eventf|run-cl|run-command|connect|disconnect|exec-command|reset-token)
+    status|list-actions|run-action|deploy|get-deploy-location|set-deploy-location|diagnostics|read-eventf|run-cl|run-sql|sql|run-command|connect|disconnect|exec-command|reset-token)
       SUBCOMMAND="$1"; shift; break ;;
     *)
       if [ -z "$SUBCOMMAND" ]; then
@@ -131,6 +136,10 @@ while [ $# -gt 0 ]; do
       OBJECT_NAME="$2"; shift 2 ;;
     -c|--command)
       COMMAND="$2"; shift 2 ;;
+    -q|--query)
+      QUERY="$2"; shift 2 ;;
+    -r|--rows)
+      ROWS="$2"; shift 2 ;;
     -e|--env)
       ENV="$2"; shift 2 ;;
     --cwd)
@@ -151,6 +160,20 @@ while [ $# -gt 0 ]; do
         OBJECT_NAME="$1"; shift
       elif [ "$SUBCOMMAND" = "exec-command" ] && [ -z "$ARGS" ]; then
         ARGS="$1"; shift
+      elif [ "$SUBCOMMAND" = "run-sql" ] || [ "$SUBCOMMAND" = "sql" ]; then
+        if [ -z "$QUERY" ]; then
+          QUERY="$1"
+        else
+          QUERY="$QUERY $1"
+        fi
+        shift
+      elif [ "$SUBCOMMAND" = "run-cl" ]; then
+        if [ -z "$COMMAND" ]; then
+          COMMAND="$1"
+        else
+          COMMAND="$COMMAND $1"
+        fi
+        shift
       else
         shift
       fi
@@ -214,16 +237,21 @@ make_request() {
   REQ_PATH="$2"
   REQ_DATA="$3"
 
-  CURL_CMD="curl -s -S -w \"\nHTTP_STATUS:%{http_code}\" -X \"$REQ_METHOD\""
-  CURL_CMD="$CURL_CMD -H \"X-CodeForIBMi-Token: $TOKEN\""
-  CURL_CMD="$CURL_CMD -H \"X-CodeForIBMi-Client: codefori-cli\""
-  CURL_CMD="$CURL_CMD -H \"Content-Type: application/json\""
   if [ -n "$REQ_DATA" ]; then
-    CURL_CMD="$CURL_CMD -d '$REQ_DATA'"
+    RESP=$(curl -s -S -w "\nHTTP_STATUS:%{http_code}" -X "$REQ_METHOD" \
+      -H "X-CodeForIBMi-Token: $TOKEN" \
+      -H "X-CodeForIBMi-Client: codefori-cli" \
+      -H "Content-Type: application/json" \
+      --data-binary "$REQ_DATA" \
+      "http://$HOST:$PORT$REQ_PATH")
+  else
+    RESP=$(curl -s -S -w "\nHTTP_STATUS:%{http_code}" -X "$REQ_METHOD" \
+      -H "X-CodeForIBMi-Token: $TOKEN" \
+      -H "X-CodeForIBMi-Client: codefori-cli" \
+      -H "Content-Type: application/json" \
+      "http://$HOST:$PORT$REQ_PATH")
   fi
-  CURL_CMD="$CURL_CMD \"http://$HOST:$PORT$REQ_PATH\""
 
-  RESP=$(eval "$CURL_CMD")
   HTTP_STATUS=$(printf '%s\n' "$RESP" | sed -n 's/.*HTTP_STATUS:\([0-9]*\)/\1/p')
   BODY=$(printf '%s\n' "$RESP" | sed 's/HTTP_STATUS:[0-9]*//g')
 
@@ -343,6 +371,28 @@ case "$SUBCOMMAND" in
     [ "$CONFIRM" -eq 1 ] && DATA="$DATA,\"confirm\":true"
     DATA="$DATA}"
     make_request "POST" "/run-cl" "$DATA"
+    ;;
+
+  run-sql|sql)
+    SQL_QUERY=""
+    if [ -n "$QUERY" ]; then
+      SQL_QUERY="$QUERY"
+    elif [ -n "$FILE" ]; then
+      if [ ! -f "$FILE" ]; then
+        echo "Error: SQL file '$FILE' not found." >&2
+        exit 1
+      fi
+      SQL_QUERY=$(cat "$FILE")
+    fi
+    if [ -z "$SQL_QUERY" ]; then
+      echo "Error: -q, --query <string> or -f, --file <path> is required for run-sql." >&2
+      exit 1
+    fi
+    DATA="{\"query\":\"$(json_escape "$SQL_QUERY")\""
+    [ -n "$ROWS" ] && DATA="$DATA,\"rows\":$ROWS"
+    [ "$CONFIRM" -eq 1 ] && DATA="$DATA,\"confirm\":true"
+    DATA="$DATA}"
+    make_request "POST" "/run-sql" "$DATA"
     ;;
 
   run-command)

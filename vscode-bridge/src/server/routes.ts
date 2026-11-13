@@ -13,6 +13,62 @@ export interface RouteContext {
   fallbackToCurl?: boolean;
   fallbackScript?: string;
   npmFound?: boolean;
+  log?: (msg: string) => void;
+  isLogEnabled?: () => boolean;
+}
+
+function formatLogPayload(data: any): string {
+  if (data === undefined || data === null) return '';
+  if (typeof data === 'string') return data;
+  if (Array.isArray(data)) {
+    if (data.length <= 10) {
+      return JSON.stringify(data, null, 2);
+    }
+    const sample = data.slice(0, 10);
+    return JSON.stringify(sample, null, 2) + `\n... (${data.length - 10} more items)`;
+  }
+  if (typeof data === 'object') {
+    if (Array.isArray(data.rows)) {
+      const rowCount = data.rowCount ?? data.rows.length;
+      if (data.rows.length <= 10) {
+        return JSON.stringify(data, null, 2);
+      }
+      const shallowCopy = { ...data, rows: data.rows.slice(0, 10) };
+      return JSON.stringify(shallowCopy, null, 2) + `\n... (${rowCount - 10} more rows)`;
+    }
+    return JSON.stringify(data, null, 2);
+  }
+  return String(data);
+}
+
+function logBridgeEvent(ctx: RouteContext, event: {
+  direction: 'req' | 'res' | 'guard';
+  endpoint: string;
+  summary: string;
+  statusCode?: number;
+  durationMs?: number;
+  data?: any;
+}): void {
+  if (!ctx.log || !ctx.isLogEnabled?.()) return;
+  const time = new Date().toLocaleTimeString();
+  let line = `[Bridge ${time}]`;
+  if (event.direction === 'req') {
+    line += ` ▶ [${event.endpoint}] ${event.summary}`;
+  } else if (event.direction === 'guard') {
+    line += ` ⚠️ [Guardrail] [${event.endpoint}] ${event.summary}`;
+  } else {
+    const icon = (event.statusCode || 200) < 400 ? '◀' : '✖';
+    const statusStr = event.statusCode ? ` (${event.statusCode}` + (event.durationMs !== undefined ? ` in ${event.durationMs}ms` : '') + ')' : '';
+    line += ` ${icon} [${event.endpoint}]${statusStr} ${event.summary}`;
+  }
+  ctx.log(line);
+  if (event.data !== undefined && event.data !== null) {
+    const str = formatLogPayload(event.data);
+    if (str) {
+      const indented = str.split('\n').map(l => '  ' + l).join('\n');
+      ctx.log(indented);
+    }
+  }
 }
 
 export async function handleRequest(
@@ -46,6 +102,7 @@ export async function handleRequest(
   const reqUrl = new URL(req.url || '/', `http://${req.headers.host || '127.0.0.1'}`);
   const pathname = reqUrl.pathname.replace(/\/+$/, '') || '/';
   const method = req.method?.toUpperCase();
+  const startTime = Date.now();
 
   try {
     // 2. Dispatch routes
@@ -58,6 +115,7 @@ export async function handleRequest(
         clPolicy: securityConfig?.clPolicy || 'prompt',
         pasePolicy: securityConfig?.pasePolicy || 'block',
         deployPolicy: securityConfig?.deployPolicy || 'prompt',
+        sqlPolicy: securityConfig?.sqlPolicy || 'select-only',
         requireCliClient: securityConfig?.requireCliClient ?? true,
         pendingChanges: await ctx.adapter.getPendingChanges(),
         preferredClient: 'codefori',
@@ -116,6 +174,12 @@ export async function handleRequest(
       // Inspect action for destructive commands if enabled
       const confirmed = body.confirm === true || body.confirmed === true || String(body.confirm).toLowerCase() === 'true' || String(body.confirmed).toLowerCase() === 'true';
 
+      logBridgeEvent(ctx, {
+        direction: 'req',
+        endpoint: 'POST /run-action',
+        summary: `Action: "${actionName}"${targetFile ? ` | Target: ${targetFile}` : ''}${deployMethod ? ` | Deploy: ${deployMethod}` : ''}`
+      });
+
       // Inspect target action for QSH restriction and destructive commands
       if (ctx.guardrail) {
         const guardConfig = ctx.guardrail.getConfig();
@@ -128,6 +192,11 @@ export async function handleRequest(
           if (actionEnv === 'qsh') {
             const qshDecision = await ctx.guardrail.evaluateCommand(targetAction.command || actionName, 'qsh', { confirmed, isAction: true });
             if (!qshDecision.allowed) {
+              logBridgeEvent(ctx, {
+                direction: 'guard',
+                endpoint: 'POST /run-action',
+                summary: `Action '${actionName}' blocked: ${qshDecision.reason || qshDecision.message}`
+              });
               sendJson(res, 403, {
                 error: qshDecision.reason || `Action '${actionName}' uses QSH environment, which is disabled by security configuration.`,
                 actionName,
@@ -145,6 +214,11 @@ export async function handleRequest(
           if (actionEnv === 'pase') {
             const paseDecision = await ctx.guardrail.evaluateCommand(targetAction.command || actionName, 'pase', { confirmed, isAction: true });
             if (!paseDecision.allowed) {
+              logBridgeEvent(ctx, {
+                direction: 'guard',
+                endpoint: 'POST /run-action',
+                summary: `Action '${actionName}' blocked: ${paseDecision.reason || paseDecision.message}`
+              });
               sendJson(res, 403, {
                 error: paseDecision.reason || `Action '${actionName}' uses PASE environment, which is disabled by security configuration.`,
                 actionName,
@@ -162,6 +236,11 @@ export async function handleRequest(
           if (guardConfig.enableActionInspection && targetAction.command) {
             const decision = await ctx.guardrail.evaluateCommand(targetAction.command, actionEnv, { confirmed, isAction: true });
             if (!decision.allowed) {
+              logBridgeEvent(ctx, {
+                direction: 'guard',
+                endpoint: 'POST /run-action',
+                summary: `Action '${actionName}' blocked: ${decision.reason || decision.message}`
+              });
               sendJson(res, 403, {
                 error: decision.reason || `Action '${actionName}' contains a destructive command blocked by security guardrail.`,
                 actionName,
@@ -179,6 +258,14 @@ export async function handleRequest(
       }
 
       const result = await ctx.adapter.runAction(actionName, workspaceIndex, { targetFile, deployMethod });
+      logBridgeEvent(ctx, {
+        direction: 'res',
+        endpoint: 'POST /run-action',
+        statusCode: 200,
+        durationMs: Date.now() - startTime,
+        summary: `Action '${actionName}' finished (Success: ${result.success})`,
+        data: result
+      });
       sendJson(res, 200, result);
       return;
     }
@@ -190,6 +277,12 @@ export async function handleRequest(
       const deployMethod = body.method;
       const confirmed = body.confirm === true || body.confirmed === true || String(body.confirm).toLowerCase() === 'true' || String(body.confirmed).toLowerCase() === 'true';
 
+      logBridgeEvent(ctx, {
+        direction: 'req',
+        endpoint: 'POST /deploy',
+        summary: `Method: ${deployMethod || 'changes'}${selectedFiles ? ` (${selectedFiles.length} file(s))` : ''}`
+      });
+
       if (ctx.guardrail) {
         const pendingChanges = await ctx.adapter.getPendingChanges(workspaceIndex);
         const deployDecision = await ctx.guardrail.evaluateDeploy({
@@ -200,6 +293,11 @@ export async function handleRequest(
         });
 
         if (!deployDecision.allowed) {
+          logBridgeEvent(ctx, {
+            direction: 'guard',
+            endpoint: 'POST /deploy',
+            summary: `Deploy blocked (${deployDecision.status}): ${deployDecision.reason || deployDecision.message}`
+          });
           sendJson(res, 403, {
             error: deployDecision.reason || "Deployment requires confirmation or specific file selection.",
             status: deployDecision.status,
@@ -217,6 +315,14 @@ export async function handleRequest(
         workspaceIndex,
         method: deployMethod,
         selectedFiles
+      });
+      logBridgeEvent(ctx, {
+        direction: 'res',
+        endpoint: 'POST /deploy',
+        statusCode: 200,
+        durationMs: Date.now() - startTime,
+        summary: `Deployed ${result.filesDeployed} file(s) (Success: ${result.success})`,
+        data: result
       });
       sendJson(res, 200, result);
       return;
@@ -246,13 +352,18 @@ export async function handleRequest(
 
     if (pathname === '/connect' && method === 'POST') {
       const body = await parseJsonBody(req);
-      const result = await ctx.adapter.connect(body.connectionName || body.profile);
+      const connName = body.connectionName || body.profile;
+      logBridgeEvent(ctx, { direction: 'req', endpoint: 'POST /connect', summary: `Target: "${connName || 'default'}"` });
+      const result = await ctx.adapter.connect(connName);
+      logBridgeEvent(ctx, { direction: 'res', endpoint: 'POST /connect', statusCode: 200, durationMs: Date.now() - startTime, summary: `Connected to ${result.connectedTo}`, data: result });
       sendJson(res, 200, result);
       return;
     }
 
     if (pathname === '/disconnect' && method === 'POST') {
+      logBridgeEvent(ctx, { direction: 'req', endpoint: 'POST /disconnect', summary: 'Disconnect requested' });
       const result = await ctx.adapter.disconnect();
+      logBridgeEvent(ctx, { direction: 'res', endpoint: 'POST /disconnect', statusCode: 200, durationMs: Date.now() - startTime, summary: 'Disconnected' });
       sendJson(res, 200, result);
       return;
     }
@@ -264,7 +375,9 @@ export async function handleRequest(
         sendJson(res, 400, { error: "Field 'commandId' is required." });
         return;
       }
+      logBridgeEvent(ctx, { direction: 'req', endpoint: 'POST /exec-command', summary: `Command: "${commandId}"`, data: body.args });
       const result = await ctx.adapter.execCommand(commandId, body.args);
+      logBridgeEvent(ctx, { direction: 'res', endpoint: 'POST /exec-command', statusCode: 200, durationMs: Date.now() - startTime, summary: `Command "${commandId}" executed`, data: result });
       sendJson(res, 200, result);
       return;
     }
@@ -290,7 +403,9 @@ export async function handleRequest(
         sendJson(res, 400, { error: "Field 'object' (e.g. 'MYLIB/MYPGM') is required." });
         return;
       }
+      logBridgeEvent(ctx, { direction: 'req', endpoint: 'POST /read-eventf', summary: `Object: "${objectName}"` });
       const result = await ctx.adapter.readEventf(objectName);
+      logBridgeEvent(ctx, { direction: 'res', endpoint: 'POST /read-eventf', statusCode: 200, durationMs: Date.now() - startTime, summary: `Parsed ${result.count} diagnostics`, data: result });
       sendJson(res, 200, result);
       return;
     }
@@ -305,10 +420,21 @@ export async function handleRequest(
       const defaultEnv = pathname === '/run-cl' ? 'ile' : (body.environment || body.env || 'ile');
       const confirmed = body.confirm === true || body.confirmed === true || String(body.confirm).toLowerCase() === 'true' || String(body.confirmed).toLowerCase() === 'true';
 
+      logBridgeEvent(ctx, {
+        direction: 'req',
+        endpoint: `POST ${pathname}`,
+        summary: `Command: "${command}" (Env: ${defaultEnv}${confirmed ? ', confirmed: true' : ''})`
+      });
+
       // Intercept and evaluate potentially destructive commands
       if (ctx.guardrail) {
         const decision = await ctx.guardrail.evaluateCommand(command, defaultEnv, { confirmed });
         if (!decision.allowed) {
+          logBridgeEvent(ctx, {
+            direction: 'guard',
+            endpoint: `POST ${pathname}`,
+            summary: `Command blocked (${decision.status}): ${decision.reason || decision.message}`
+          });
           sendJson(res, 403, {
             error: decision.reason || 'Destructive command blocked by security guardrail.',
             command,
@@ -323,6 +449,73 @@ export async function handleRequest(
       }
 
       const result = await ctx.adapter.runRemoteCommand(command, defaultEnv, body.cwd);
+      logBridgeEvent(ctx, {
+        direction: 'res',
+        endpoint: `POST ${pathname}`,
+        statusCode: 200,
+        durationMs: Date.now() - startTime,
+        summary: `Command executed (Exit Code: ${result.code})`,
+        data: result
+      });
+      sendJson(res, 200, result);
+      return;
+    }
+
+    if (pathname === '/run-sql' && method === 'POST') {
+      const body = await parseJsonBody(req);
+      const query = body.query || body.sql;
+      if (!query || typeof query !== 'string') {
+        sendJson(res, 400, { error: "Field 'query' (or 'sql') is required." });
+        return;
+      }
+      const confirmed = body.confirm === true || body.confirmed === true || String(body.confirm).toLowerCase() === 'true' || String(body.confirmed).toLowerCase() === 'true';
+
+      logBridgeEvent(ctx, {
+        direction: 'req',
+        endpoint: 'POST /run-sql',
+        summary: `Query: "${query}"${confirmed ? ' (confirmed: true)' : ''}`
+      });
+
+      if (ctx.guardrail) {
+        const decision = await ctx.guardrail.evaluateSqlCommand(query, { confirmed });
+        if (!decision.allowed) {
+          logBridgeEvent(ctx, {
+            direction: 'guard',
+            endpoint: 'POST /run-sql',
+            summary: `SQL blocked (${decision.status}): ${decision.reason || decision.message}`
+          });
+          sendJson(res, 403, {
+            error: decision.reason || 'SQL statement blocked by security guardrail.',
+            query,
+            status: decision.status,
+            isDestructive: decision.isDestructive,
+            matchedPattern: decision.matchedPattern,
+            message: decision.message
+          });
+          return;
+        }
+      }
+
+      const result = await ctx.adapter.runSql(query, {
+        rows: body.rows ? Number(body.rows) : undefined,
+        bindings: body.bindings
+      });
+
+      logBridgeEvent(ctx, {
+        direction: 'res',
+        endpoint: 'POST /run-sql',
+        statusCode: result.success ? 200 : 500,
+        durationMs: Date.now() - startTime,
+        summary: result.success
+          ? `${result.rowCount} row(s) returned (job: ${result.jobId || 'n/a'})`
+          : `SQL execution failed: ${result.error}`,
+        data: result
+      });
+
+      if (!result.success) {
+        sendJson(res, 500, result);
+        return;
+      }
       sendJson(res, 200, result);
       return;
     }
@@ -337,6 +530,14 @@ export async function handleRequest(
     sendJson(res, 404, { error: `Route not found: ${method} ${pathname}` });
   } catch (err: any) {
     const statusCode = err.statusCode || (err.message && err.message.includes('not found') ? 404 : 500);
+    logBridgeEvent(ctx, {
+      direction: 'res',
+      endpoint: `${method} ${pathname}`,
+      statusCode,
+      durationMs: Date.now() - startTime,
+      summary: `Internal error: ${err.message || String(err)}`,
+      data: { error: err.message, validActions: err.validActions }
+    });
     sendJson(res, statusCode, {
       error: err.message || 'Internal Bridge Server Error',
       validActions: err.validActions

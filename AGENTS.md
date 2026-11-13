@@ -42,6 +42,7 @@ Workspace compilation and build actions are configured in **`.vscode/actions.jso
 3. **Destructive Operations Require User Confirmation**: Any command that deletes or clears objects (`DLTLIB`, `DLTOBJ`, `DLTF`, `CLRPFM`, etc.) requires explicit confirmation. Prompt the user in chat first, and once confirmed, pass `--confirm`.
 4. **Targeted Deployment**: When deploying files, prioritize targeting specific modified files using `--files "path/to/file"` rather than blanket deploys. Blanket deploys require `--confirm`.
 5. **Inspect Compiler Messages**: Never speculate on why a build failed. Always inspect the compiler listing via `codefori diagnostics` or `codefori read-eventf`.
+6. **SQL Queries**: Use `codefori run-sql -q "SELECT ..."` to query database tables and IBM i system catalogs (`QSYS2.OBJECT_STATISTICS`, `QSYS2.SYSCOLUMNS`, `QSYS2.ACTIVE_JOB_INFO`). By default, `sqlPolicy: select-only` permits read-only queries with zero friction while blocking modifications.
 
 ## Quick Reference
 ```bash
@@ -63,5 +64,8 @@ codefori deploy -m changes --files "qrpglesrc/myprog.rpgle"
 
 # Run CL command (requires --confirm)
 codefori run-cl -c "DSPOBJD OBJ(MYLIB/*ALL) OBJTYPE(*PGM)" --confirm
+
+# Query system catalogs or database tables
+codefori run-sql -q "SELECT OBJNAME, OBJTYPE, OBJTEXT FROM TABLE(QSYS2.OBJECT_STATISTICS('MYLIB', '*ALL'))"
 ```
 <!-- CODEFORI_GUIDE_END -->

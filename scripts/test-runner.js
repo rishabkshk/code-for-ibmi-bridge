@@ -1,6 +1,7 @@
 const http = require('http');
 const { spawn } = require('child_process');
 const path = require('path');
+const fs = require('fs');
 const assert = require('assert');
 const Module = require('module');
 
@@ -35,7 +36,16 @@ const mockVscode = {
       activate: async () => {},
       exports: {
         instance: {
-          getConnection: () => ({ currentConnectionName: 'PUB400' })
+          getConnection: () => ({
+            currentConnectionName: 'PUB400',
+            enableSQL: true,
+            sqlRunnerAvailable: () => true,
+            getSqlJobId: () => '123456/QUSER/QZDASOINIT',
+            runSQL: async (query, opts) => [
+              { CUSNUM: 938241, LSTNAM: 'Johnson', CDTLMT: 5000 },
+              { CUSNUM: 839283, LSTNAM: 'Jones', CDTLMT: 2000 }
+            ]
+          })
         },
         deployTools: {
           launchDeploy: async (workspaceIndex, method, selectedUris) => {
@@ -219,7 +229,33 @@ const mockAdapter = {
     stdout: `Executed ${command} in ${environment || 'ile'}`,
     stderr: '',
     command
-  })
+  }),
+  runSql: async (query, options) => {
+    const clean = (query || '').trim();
+    if (clean.toUpperCase().startsWith('SELECT') || clean.toUpperCase().startsWith('VALUES') || clean.toUpperCase().startsWith('WITH')) {
+      return {
+        success: true,
+        hasResults: true,
+        rowCount: 2,
+        columns: ['CUSNUM', 'LSTNAM', 'CDTLMT'],
+        rows: [
+          { CUSNUM: 938241, LSTNAM: 'Johnson', CDTLMT: 5000 },
+          { CUSNUM: 839283, LSTNAM: 'Jones', CDTLMT: 2000 }
+        ],
+        jobId: '123456/QUSER/QZDASOINIT',
+        executionTimeMs: 15
+      };
+    }
+    return {
+      success: true,
+      hasResults: false,
+      rowCount: 0,
+      columns: [],
+      rows: [],
+      jobId: '123456/QUSER/QZDASOINIT',
+      executionTimeMs: 25
+    };
+  }
 };
 
 function request(method, path, body, token, customHeaders = {}) {
@@ -312,11 +348,18 @@ async function runTests() {
     console.log('[PASS] Returned 401 for incorrect token');
 
     // 2b. Direct Raw Curl Block Test
-    console.log('\n[Test 2b] Direct Raw Curl Blocked (Missing X-CodeForIBMi-Client Header)');
-    const resNoClient = await request('GET', '/status', null, currentToken, { 'X-CodeForIBMi-Client': '' });
+    console.log('\n[Test 2b] Direct Raw Curl Blocked (Missing X-CodeForIBMi-Client Header with curl User-Agent)');
+    const resNoClient = await request('GET', '/status', null, currentToken, { 'X-CodeForIBMi-Client': '', 'User-Agent': 'curl/8.4.0' });
     assert.strictEqual(resNoClient.status, 403);
     assert.strictEqual(resNoClient.data.error.includes('Direct raw curl/HTTP access'), true);
     console.log('[PASS] Direct raw curl blocked with 403 and CLI usage instructions');
+
+    // 2c. Outdated CLI Block Test (Non-curl client missing X-CodeForIBMi-Client)
+    console.log('\n[Test 2c] Outdated CLI Blocked (Missing X-CodeForIBMi-Client Header without curl User-Agent)');
+    const resOutdated = await request('GET', '/status', null, currentToken, { 'X-CodeForIBMi-Client': '' });
+    assert.strictEqual(resOutdated.status, 403);
+    assert.strictEqual(resOutdated.data.error.includes("Your CLI version is outdated. Please update via 'npm install -g @rishabkshk/codefori-cli'"), true);
+    console.log('[PASS] Outdated CLI blocked with clear update instructions');
 
     // 3. Status Endpoint
     console.log('\n[Test 3] GET /status (Valid Token)');
@@ -472,6 +515,59 @@ async function runTests() {
     assert.strictEqual(resRunCl.status, 200);
     assert.strictEqual(resRunCl.data.success, true);
     console.log('[PASS] Remote command endpoints verified');
+
+    // 14b. Run SQL Query Endpoint & sqlPolicy Guardrail Tests
+    console.log('\n[Test 14b] POST /run-sql (SELECT query under select-only policy)');
+    securityConfig.sqlPolicy = 'select-only';
+    const resRunSqlSelect = await request('POST', '/run-sql', {
+      query: 'SELECT * FROM QIWS.QCUSTCDT'
+    }, currentToken);
+    assert.strictEqual(resRunSqlSelect.status, 200);
+    assert.strictEqual(resRunSqlSelect.data.success, true);
+    assert.strictEqual(resRunSqlSelect.data.hasResults, true);
+    assert.strictEqual(resRunSqlSelect.data.rowCount, 2);
+    console.log('[PASS] POST /run-sql SELECT query succeeded under default select-only policy');
+
+    console.log('\n[Test 14c] POST /run-sql (Modifications blocked under select-only policy)');
+    const resRunSqlDropBlocked = await request('POST', '/run-sql', {
+      query: 'DROP TABLE MYLIB.TEST'
+    }, currentToken);
+    assert.strictEqual(resRunSqlDropBlocked.status, 403);
+    assert.strictEqual(resRunSqlDropBlocked.data.status, 'blocked');
+    console.log('[PASS] DROP TABLE blocked under select-only policy');
+
+    const resRunSqlInsertBlocked = await request('POST', '/run-sql', {
+      query: 'INSERT INTO MYLIB.TEST VALUES(1)'
+    }, currentToken);
+    assert.strictEqual(resRunSqlInsertBlocked.status, 403);
+    assert.strictEqual(resRunSqlInsertBlocked.data.status, 'blocked');
+    console.log('[PASS] INSERT INTO blocked under select-only policy');
+
+    console.log('\n[Test 14d] POST /run-sql (sqlPolicy: prompt confirmation handling)');
+    securityConfig.sqlPolicy = 'prompt';
+    const resPromptDropUnconfirmed = await request('POST', '/run-sql', {
+      query: 'DROP TABLE MYLIB.TEST'
+    }, currentToken);
+    assert.strictEqual(resPromptDropUnconfirmed.status, 403);
+    assert.strictEqual(resPromptDropUnconfirmed.data.status, 'confirmation_required');
+
+    const resPromptDropConfirmed = await request('POST', '/run-sql', {
+      query: 'DROP TABLE MYLIB.TEST',
+      confirm: true
+    }, currentToken);
+    assert.strictEqual(resPromptDropConfirmed.status, 200);
+    assert.strictEqual(resPromptDropConfirmed.data.success, true);
+    console.log('[PASS] DROP TABLE requires and succeeds with confirmation under prompt policy');
+
+    console.log('\n[Test 14e] POST /run-sql (sqlPolicy: block completely blocks all SQL)');
+    securityConfig.sqlPolicy = 'block';
+    const resBlockAllSql = await request('POST', '/run-sql', {
+      query: 'SELECT 1 FROM SYSIBM.SYSDUMMY1'
+    }, currentToken);
+    assert.strictEqual(resBlockAllSql.status, 403);
+    assert.strictEqual(resBlockAllSql.data.status, 'blocked');
+    console.log('[PASS] All SQL statements blocked under block policy');
+    securityConfig.sqlPolicy = 'select-only';
 
     // 15. Security Guardrail Verification Tests
     console.log('\n[Test 15] Security Guardrail - Endpoint & Policy Verification');
@@ -981,8 +1077,92 @@ async function runTests() {
     assert(cliRunClBlocked.stderr.includes('Security Guardrail Blocked') || cliRunClBlocked.stdout.includes('Security Guardrail Blocked'));
     console.log('[PASS] CLI cleanly blocks destructive command under policy block even with --confirm');
 
+    // CLI SQL Execution Tests
+    console.log('\n[CLI Test 17] codefori run-sql -q "SELECT * FROM QIWS.QCUSTCDT" --json');
+    securityConfig.sqlPolicy = 'select-only';
+    const cliRunSqlJson = await runCliAsync(['run-sql', '-q', 'SELECT * FROM QIWS.QCUSTCDT', '--json'], cliEnv);
+    assert.strictEqual(cliRunSqlJson.status, 0, `CLI failed with error: ${cliRunSqlJson.stderr}`);
+    const parsedSqlJson = JSON.parse(cliRunSqlJson.stdout);
+    assert.strictEqual(parsedSqlJson.success, true);
+    assert.strictEqual(parsedSqlJson.rowCount, 2);
+    console.log('[PASS] codefori run-sql returned valid JSON result');
+
+    console.log('\n[CLI Test 18] codefori run-sql -q "SELECT * FROM QIWS.QCUSTCDT" formatted table');
+    const cliRunSqlTable = await runCliAsync(['run-sql', '-q', 'SELECT * FROM QIWS.QCUSTCDT'], cliEnv);
+    assert.strictEqual(cliRunSqlTable.status, 0, `CLI failed with error: ${cliRunSqlTable.stderr}`);
+    assert(cliRunSqlTable.stdout.includes('Johnson'));
+    assert(cliRunSqlTable.stdout.includes('CUSNUM'));
+    console.log('[PASS] codefori run-sql formatted output renders table successfully');
+
+    console.log('\n[CLI Test 19] codefori run-sql -q "DROP TABLE TEST" blocked under select-only');
+    const cliRunSqlDropBlocked = await runCliAsync(['run-sql', '-q', 'DROP TABLE TEST'], cliEnv);
+    assert.strictEqual(cliRunSqlDropBlocked.status, 1, 'DROP TABLE should exit with code 1 under select-only');
+    assert(cliRunSqlDropBlocked.stderr.includes('select-only') || cliRunSqlDropBlocked.stdout.includes('select-only'));
+    console.log('[PASS] codefori run-sql cleanly blocks destructive statement under select-only');
+
+    console.log('\n[CLI Test 20] codefori run-sql -f file.sql with quotes and multiple columns');
+    securityConfig.sqlPolicy = 'prompt';
+    const tempSqlFile = path.join(__dirname, 'temp_test.sql');
+    fs.writeFileSync(tempSqlFile, "INSERT INTO QTEMP.TEST_PRODUCTS VALUES (101, 'Mechanical Keyboard', 89.99, 15)", 'utf8');
+    try {
+      const cliRunSqlFile = await runCliAsync(['run-sql', '-f', tempSqlFile, '--confirm', '--json'], cliEnv);
+      assert.strictEqual(cliRunSqlFile.status, 0, `CLI failed with error: ${cliRunSqlFile.stderr}`);
+      const parsedFileSql = JSON.parse(cliRunSqlFile.stdout);
+      assert.strictEqual(parsedFileSql.success, true);
+      console.log('[PASS] codefori run-sql executes SQL loaded from file successfully');
+    } finally {
+      if (fs.existsSync(tempSqlFile)) fs.unlinkSync(tempSqlFile);
+    }
+
+    console.log('\n[CLI Test 21] codefori run-sql with multiple columns and commas');
+    const cliRunSqlCols = await runCliAsync(['run-sql', '-q', 'SELECT PROD_ID, PROD_NAME, PRICE, STOCK_QTY FROM QTEMP.TEST_PRODUCTS', '--json'], cliEnv);
+    assert.strictEqual(cliRunSqlCols.status, 0, `CLI failed: ${cliRunSqlCols.stderr}`);
+    assert.strictEqual(JSON.parse(cliRunSqlCols.stdout).success, true);
+    console.log('[PASS] codefori run-sql preserved multiple columns and commas');
+
+    console.log('\n[CLI Test 22] codefori run-sql multi-row INSERT with single quotes');
+    securityConfig.sqlPolicy = 'prompt';
+    const cliRunSqlQuotes = await runCliAsync(['run-sql', '-q', "INSERT INTO QTEMP.TEST_PRODUCTS VALUES (101, 'Mechanical Keyboard', 89.99, 15), (102, 'Wireless Mouse', 29.50, 40)", '--confirm', '--json'], cliEnv);
+    assert.strictEqual(cliRunSqlQuotes.status, 0, `CLI failed: ${cliRunSqlQuotes.stderr}`);
+    assert.strictEqual(JSON.parse(cliRunSqlQuotes.stdout).success, true);
+    console.log('[PASS] codefori run-sql preserved single quotes and multi-row INSERT');
+
+    console.log('\n[CLI Test 23] codefori run-sql positional query syntax without -q');
+    const cliRunSqlPositional = await runCliAsync(['run-sql', 'SELECT PROD_ID, PROD_NAME FROM QTEMP.TEST_PRODUCTS', '--json'], cliEnv);
+    assert.strictEqual(cliRunSqlPositional.status, 0, `CLI failed: ${cliRunSqlPositional.stderr}`);
+    assert.strictEqual(JSON.parse(cliRunSqlPositional.stdout).success, true);
+    console.log('[PASS] codefori run-sql executed positional query string');
+
+    console.log('\n[CLI Test 24] codefori run-sql recombines shell-split query tokens');
+    const cliRunSqlSplit = await runCliAsync(['run-sql', '-q', 'SELECT', 'PROD_ID,', 'PROD_NAME,', 'PRICE', 'FROM', 'QTEMP.TEST_PRODUCTS', '--json'], cliEnv);
+    assert.strictEqual(cliRunSqlSplit.status, 0, `CLI failed: ${cliRunSqlSplit.stderr}`);
+    assert.strictEqual(JSON.parse(cliRunSqlSplit.stdout).success, true);
+    console.log('[PASS] codefori run-sql successfully recombined shell-split query tokens');
+
+    // Test Server-Side Command & Result Logging
+    console.log('\n[Test] Server-Side Command & Result Logging');
+    const capturedLogs = [];
+    let loggingActive = true;
+    server.setLogger(msg => capturedLogs.push(msg), () => loggingActive);
+
+    // Run an SQL command and verify logs
+    await request('POST', '/run-sql', { query: 'SELECT * FROM QIWS.QCUSTCDT' }, currentToken);
+    assert(capturedLogs.some(l => l.includes('POST /run-sql') && l.includes('SELECT * FROM QIWS.QCUSTCDT')), 'Expected request log for SQL query');
+    assert(capturedLogs.some(l => l.includes('row(s) returned')), 'Expected response log for SQL query');
+
+    // Run a CL command and verify logs
+    await request('POST', '/run-cl', { command: 'DSPOBJD OBJ(LIB/PGM) OBJTYPE(*PGM)', confirm: true }, currentToken);
+    assert(capturedLogs.some(l => l.includes('POST /run-cl') && l.includes('DSPOBJD')), 'Expected request log for CL command');
+    assert(capturedLogs.some(l => l.includes('Command executed (Exit Code: 0)')), 'Expected response log for CL command');
+
+    // Test disabling logging via setting callback
+    capturedLogs.length = 0;
+    loggingActive = false;
+    await request('POST', '/run-sql', { query: 'SELECT 1 FROM SYSIBM.SYSDUMMY1' }, currentToken);
+    assert.strictEqual(capturedLogs.length, 0, 'No logs should be captured when logCommands setting is false');
+    console.log('[PASS] Server-side command execution and result logging verified with toggle setting');
+
     // Run Zero-Dependency Curl Script Test Suite (bin/codefori.sh)
-    const fs = require('fs');
     console.log('\n--- Testing Zero-Dependency curl script (codefori.sh) ---');
     let shBinary = 'sh';
     if (process.platform === 'win32') {

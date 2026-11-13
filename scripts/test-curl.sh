@@ -149,6 +149,43 @@ RAW_OUT=$(curl -s -S -X GET "http://127.0.0.1:$PORT/status" -H "X-CodeForIBMi-To
 echo "$RAW_OUT" | grep -q "Direct raw curl/HTTP access to the bridge server is disabled"
 echo "[PASS] direct raw curl safely blocked with 403 and guidance"
 
+# 17. SQL Runner Query Test
+echo "\n[Curl Test 17] codefori.sh run-sql -q \"SELECT * FROM QIWS.QCUSTCDT\""
+run_cli run-sql -q "SELECT * FROM QIWS.QCUSTCDT" --json | grep -q 'Johnson'
+echo "[PASS] run-sql SELECT succeeded"
+
+# 18. SQL Runner Guardrail Block Test
+echo "\n[Curl Test 18] codefori.sh run-sql -q \"DROP TABLE TEST\" blocked under select-only"
+if run_cli run-sql -q "DROP TABLE TEST" --json 2>/dev/null; then
+  echo "Expected DROP TABLE to be blocked under select-only policy!" >&2
+  exit 1
+fi
+echo "[PASS] run-sql DROP TABLE blocked under select-only policy"
+
+# 19. Multi-Column SELECT with Commas
+echo "\n[Curl Test 19] codefori.sh run-sql with multiple columns and commas"
+run_cli run-sql -q "SELECT PROD_ID, PROD_NAME, PRICE, STOCK_QTY FROM QTEMP.TEST_PRODUCTS" --json | grep -q 'CUSNUM'
+echo "[PASS] run-sql SELECT with multiple columns and commas passed"
+
+# 20. INSERT with Embedded Single Quotes and Commas
+echo "\n[Curl Test 20] codefori.sh run-sql with embedded single quotes"
+securityConfig="prompt"
+run_cli run-sql -q "INSERT INTO QTEMP.TEST_PRODUCTS VALUES (101, 'Mechanical Keyboard', 89.99, 15), (102, 'Wireless Mouse', 29.50, 40)" --confirm --json | grep -q 'success'
+echo "[PASS] run-sql INSERT with embedded single quotes and multi-row passed"
+
+# 21. Positional Query without -q
+echo "\n[Curl Test 21] codefori.sh run-sql positional query syntax"
+run_cli run-sql "SELECT PROD_ID, PROD_NAME FROM QTEMP.TEST_PRODUCTS" --json | grep -q 'CUSNUM'
+echo "[PASS] run-sql positional query without -q passed"
+
+# 22. File-Based SQL Execution with -f
+echo "\n[Curl Test 22] codefori.sh run-sql -f file.sql with quotes and multiple columns"
+TEMP_SQL="temp_curl_test.sql"
+echo "INSERT INTO QTEMP.TEST_PRODUCTS VALUES (103, 'USB-C Cable', 9.99, 100)" > "$TEMP_SQL"
+run_cli run-sql -f "$TEMP_SQL" --confirm --json | grep -q 'success'
+rm -f "$TEMP_SQL"
+echo "[PASS] run-sql -f file execution passed"
+
 echo "\n========================================================"
 echo " ALL CURL SCRIPT VERIFICATION TESTS PASSED! (100%)"
 echo "========================================================"

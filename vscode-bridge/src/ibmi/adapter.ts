@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { exec } from 'child_process';
-import { Action, ActionResult, BridgeStatus, CodeForIBMi, DeploymentMethod } from './types';
+import { Action, ActionResult, BridgeStatus, CodeForIBMi, DeploymentMethod, SqlExecutionResult } from './types';
 
 export const EXTENSION_ID = 'halcyontechltd.code-for-ibmi';
 
@@ -61,6 +61,8 @@ export class CodeForIBMiAdapter {
     const api = this.getExportedApi();
     const connection = api?.instance?.getConnection();
     const connected = connection !== undefined && connection !== null;
+    const sqlEnabled = Boolean(connection?.enableSQL || (typeof connection?.sqlRunnerAvailable === 'function' && connection.sqlRunnerAvailable()));
+    const sqlJobId = typeof connection?.getSqlJobId === 'function' ? connection.getSqlJobId() : connection?.sqlJob?.id;
 
     return {
       ready: installed && active,
@@ -70,7 +72,9 @@ export class CodeForIBMiAdapter {
       connected,
       connectionName: connection?.currentConnectionName,
       host: connection?.currentHost,
-      port
+      port,
+      sqlEnabled,
+      sqlJobId
     };
   }
 
@@ -642,6 +646,73 @@ export class CodeForIBMiAdapter {
     } catch (err: any) {
       throw new Error(`Remote command failed: ${err.message || String(err)}`);
     }
+  }
+
+  public async runSql(
+    query: string,
+    options?: {
+      rows?: number;
+      bindings?: any[];
+    }
+  ): Promise<SqlExecutionResult> {
+    await this.ensureActive();
+    const cleanQuery = (query || '').trim();
+    if (!cleanQuery) {
+      throw new Error("Parameter 'query' cannot be empty.");
+    }
+
+    const api = this.getExportedApi();
+    const connection = api?.instance?.getConnection();
+    if (!connection) {
+      throw new Error("IBM i is not connected. Connect first via 'codefori connect --profile <name>' or the VS Code connection menu.");
+    }
+
+    const isSqlAvailable = Boolean(connection.enableSQL || (typeof connection.sqlRunnerAvailable === 'function' && connection.sqlRunnerAvailable()) || connection.runSQL);
+    if (!isSqlAvailable) {
+      throw new Error("SQL runner (Mapepire) is not available on this IBM i connection. Ensure Java (8, 11, 17, or 21) is installed on the host and reconnect.");
+    }
+
+    const maxRows = options?.rows !== undefined && options.rows > 0 ? options.rows : 100;
+    const startTime = Date.now();
+    let rawResult: any;
+
+    try {
+      if (typeof connection.runSQL === 'function') {
+        rawResult = await connection.runSQL(cleanQuery, {
+          rows: maxRows,
+          bindings: options?.bindings
+        });
+      } else {
+        throw new Error("Active connection does not implement runSQL.");
+      }
+    } catch (err: any) {
+      const executionTimeMs = Date.now() - startTime;
+      const sqlstate = err.sqlstate || (/,\s*([0-9A-Z]{5}),\s*-?\d+\s*$/.exec(err.message || '')?.[1]);
+      return {
+        success: false,
+        hasResults: false,
+        rowCount: 0,
+        jobId: typeof connection.getSqlJobId === 'function' ? connection.getSqlJobId() : connection.sqlJob?.id,
+        executionTimeMs,
+        error: err.message || String(err),
+        sqlstate
+      };
+    }
+
+    const executionTimeMs = Date.now() - startTime;
+    const rows: Record<string, any>[] = Array.isArray(rawResult) ? rawResult : [];
+    const hasResults = rows.length > 0;
+    const columns = hasResults && rows[0] && typeof rows[0] === 'object' ? Object.keys(rows[0]) : [];
+
+    return {
+      success: true,
+      hasResults,
+      rowCount: rows.length,
+      columns,
+      rows,
+      jobId: typeof connection.getSqlJobId === 'function' ? connection.getSqlJobId() : connection.sqlJob?.id,
+      executionTimeMs
+    };
   }
 
   private async ensureActive(): Promise<void> {

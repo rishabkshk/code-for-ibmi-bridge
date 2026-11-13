@@ -134,6 +134,10 @@ export class SettingsWebviewPanel {
             vscode.commands.executeCommand('codeForIBMiBridge.generateAgentDoc');
             break;
           }
+          case 'showOutput': {
+            vscode.commands.executeCommand('codeForIBMiBridge.showOutput');
+            break;
+          }
           case 'refresh': {
             this.refresh();
             break;
@@ -183,6 +187,7 @@ export class SettingsWebviewPanel {
     const configuredPort = config.get<number>('port', 0);
     const promptOnMissingNpm = config.get<boolean>('promptOnMissingNpm', false);
     const generateAgentDoc = config.get<boolean>('generateAgentDoc', true);
+    const logCommands = config.get<boolean>('logCommands', true);
 
     return {
       isRunning,
@@ -191,6 +196,7 @@ export class SettingsWebviewPanel {
       configuredPort,
       token,
       autoStart,
+      logCommands,
       cliMode,
       activeMethod,
       isNpm,
@@ -220,6 +226,7 @@ export class SettingsWebviewPanel {
     configuredPort: number;
     token: string;
     autoStart: boolean;
+    logCommands: boolean;
     cliMode: string;
     activeMethod: string;
     isNpm: boolean;
@@ -649,6 +656,18 @@ export class SettingsWebviewPanel {
           <div class="setting-header">
             <div class="setting-info">
               <label class="checkbox-container">
+                <input type="checkbox" id="check-logcommands" ${data.logCommands ? 'checked' : ''}>
+                <span class="setting-label">Log Executed Commands & Results</span>
+              </label>
+              <div class="setting-desc">Log executed bridge commands, queries, and returned results to the "Code for IBM i Bridge" Output channel.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="setting-card">
+          <div class="setting-header">
+            <div class="setting-info">
+              <label class="checkbox-container">
                 <input type="checkbox" id="check-generate-agent-doc" ${data.generateAgentDoc ? 'checked' : ''}>
                 <span class="setting-label">Maintain AI Agent Guidelines (AGENTS.md)</span>
               </label>
@@ -674,6 +693,7 @@ export class SettingsWebviewPanel {
               <button id="btn-stop-server" class="btn btn-secondary" style="display: ${data.isRunning ? 'inline-flex' : 'none'};">⏹ Stop Server</button>
               <button id="btn-restart-server" class="btn btn-secondary" style="display: ${data.isRunning ? 'inline-flex' : 'none'};">🔄 Restart Server</button>
               <button id="btn-start-server" class="btn" style="display: ${!data.isRunning ? 'inline-flex' : 'none'};">▶ Start Server</button>
+              <button id="btn-open-output" class="btn btn-secondary">📜 Open Bridge Output Log</button>
             </div>
           </div>
         </div>
@@ -859,6 +879,24 @@ export class SettingsWebviewPanel {
         <div class="setting-card">
           <div class="setting-header">
             <div class="setting-info">
+              <div class="setting-label">SQL Execution Policy</div>
+              <div class="setting-desc">Governs SQL statements executed via bridge (/run-sql). By default, select-only permits read-only queries with zero friction.</div>
+            </div>
+            <div class="setting-control">
+              <select id="select-sql">
+                <option value="select-only" ${data.secConfig.sqlPolicy === 'select-only' ? 'selected' : ''}>select-only (Safe read-only queries only - Default)</option>
+                <option value="prompt" ${data.secConfig.sqlPolicy === 'prompt' ? 'selected' : ''}>prompt (Queries free, modifications require --confirm)</option>
+                <option value="modal" ${data.secConfig.sqlPolicy === 'modal' ? 'selected' : ''}>modal (Interactive VS Code dialog for writes)</option>
+                <option value="block" ${data.secConfig.sqlPolicy === 'block' ? 'selected' : ''}>block (Strictly disable all SQL execution)</option>
+                <option value="allow" ${data.secConfig.sqlPolicy === 'allow' ? 'selected' : ''}>allow (Permit all SQL statements)</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="setting-card">
+          <div class="setting-header">
+            <div class="setting-info">
               <div class="setting-label">Prompt Timeout (Seconds)</div>
               <div class="setting-desc">Timeout to wait for user confirmation before automatically rejecting the command.</div>
             </div>
@@ -987,6 +1025,7 @@ export class SettingsWebviewPanel {
       const settings = {
         'code-for-ibmi-bridge.port': parseInt(document.getElementById('input-port').value, 10) || 0,
         'code-for-ibmi-bridge.autoStart': document.getElementById('check-autostart').checked,
+        'code-for-ibmi-bridge.logCommands': document.getElementById('check-logcommands').checked,
         'code-for-ibmi-bridge.cliMode': document.getElementById('select-climode').value,
         'code-for-ibmi-bridge.promptOnMissingNpm': document.getElementById('check-prompt-npm').checked,
         'code-for-ibmi-bridge.generateAgentDoc': document.getElementById('check-generate-agent-doc').checked,
@@ -995,6 +1034,7 @@ export class SettingsWebviewPanel {
         'code-for-ibmi-bridge.security.pasePolicy': document.getElementById('select-pase').value,
         'code-for-ibmi-bridge.security.clPolicy': document.getElementById('select-cl').value,
         'code-for-ibmi-bridge.security.deployPolicy': document.getElementById('select-deploy').value,
+        'code-for-ibmi-bridge.security.sqlPolicy': document.getElementById('select-sql').value,
         'code-for-ibmi-bridge.security.promptTimeoutSeconds': parseInt(document.getElementById('input-timeout').value, 10) || 60,
         'code-for-ibmi-bridge.security.enableActionInspection': document.getElementById('check-actioninsp').checked,
         'code-for-ibmi-bridge.security.allowedCommands': document.getElementById('textarea-allowed').value.split('\\n').map(s => s.trim()).filter(Boolean),
@@ -1038,6 +1078,8 @@ export class SettingsWebviewPanel {
     if (btnRestart) btnRestart.addEventListener('click', () => sendMessage('startServer'));
     const btnStart = document.getElementById('btn-start-server');
     if (btnStart) btnStart.addEventListener('click', () => sendMessage('startServer'));
+    const btnOpenOutput = document.getElementById('btn-open-output');
+    if (btnOpenOutput) btnOpenOutput.addEventListener('click', () => sendMessage('showOutput'));
 
     // Attach Token Button Listeners
     const btnCopyToken = document.getElementById('btn-copy-token');
@@ -1113,6 +1155,7 @@ export class SettingsWebviewPanel {
 
           setVal('input-port', d.configuredPort);
           setCheck('check-autostart', d.autoStart);
+          setCheck('check-logcommands', d.logCommands);
           setVal('select-climode', d.cliMode);
           setCheck('check-prompt-npm', d.promptOnMissingNpm);
           setCheck('check-generate-agent-doc', d.generateAgentDoc);
@@ -1121,6 +1164,7 @@ export class SettingsWebviewPanel {
           setVal('select-pase', d.secConfig?.pasePolicy || 'block');
           setVal('select-cl', d.secConfig?.clPolicy || 'prompt');
           setVal('select-deploy', d.secConfig?.deployPolicy || 'prompt');
+          setVal('select-sql', d.secConfig?.sqlPolicy || 'select-only');
           setVal('input-timeout', d.secConfig?.promptTimeoutSeconds ?? 60);
           setCheck('check-actioninsp', d.secConfig?.enableActionInspection);
         }

@@ -6,9 +6,9 @@ import { Formatter } from './formatters';
 
 const program = new Command();
 
-let cliVersion = '0.2.6';
+let cliVersion = '0.2.7';
 try {
-  cliVersion = require('../package.json').version || '0.2.6';
+  cliVersion = require('../package.json').version || '0.2.7';
 } catch {
   // fallback
 }
@@ -309,14 +309,24 @@ program
 
 // 13. Run CL Command (Shortcut for ILE CL commands)
 program
-  .command('run-cl')
+  .command('run-cl [rawCommand...]')
   .description('Execute a Control Language (CL) command directly on the connected IBM i')
-  .requiredOption('-c, --command <string>', 'CL command string (e.g. "WRKSYSSTS", "DSPOBJD OBJ(MYLIB/*ALL) OBJTYPE(*PGM)")')
+  .option('-c, --command <string>', 'CL command string (e.g. "WRKSYSSTS", "DSPOBJD OBJ(MYLIB/*ALL) OBJTYPE(*PGM)")')
   .option('--confirm', 'Confirm execution of potentially destructive commands')
-  .action(async (options, cmd) => {
+  .action(async (rawCommand: string[] | undefined, options: any, cmd: any) => {
+    let commandStr = options.command;
+    if (!commandStr && rawCommand && rawCommand.length > 0) {
+      commandStr = rawCommand.join(' ');
+    } else if (commandStr && rawCommand && rawCommand.length > 0) {
+      commandStr = `${commandStr} ${rawCommand.join(' ')}`;
+    }
+    if (!commandStr || !commandStr.trim()) {
+      Formatter.printError(new Error("Either -c, --command <string> or an inline command string is required."), cmd.optsWithGlobals().json);
+      process.exit(1);
+    }
     const client = getClient(cmd);
     try {
-      const result = await client.runRemoteCommand(options.command, 'ile', undefined, options.confirm);
+      const result = await client.runRemoteCommand(commandStr.trim(), 'ile', undefined, options.confirm);
       Formatter.print(result, client.config.json, Formatter.formatRemoteCommandResult);
       process.exit(result.success ? 0 : 1);
     } catch (err: any) {
@@ -325,7 +335,50 @@ program
     }
   });
 
-// 14. Reset Token
+// 14. Run SQL Query or Statement
+program
+  .command('run-sql [rawQuery...]')
+  .alias('sql')
+  .description('Execute an SQL statement or query on the connected IBM i')
+  .option('-q, --query <string>', 'Inline SQL query string (e.g. "SELECT * FROM QIWS.QCUSTCDT")')
+  .option('-f, --file <file>', 'Path to local file containing SQL statement(s)')
+  .option('-r, --rows <number>', 'Maximum number of rows to return (default: 100)')
+  .option('--confirm', 'Confirm execution of potentially destructive or modifying SQL statements')
+  .action(async (rawQuery: string[] | undefined, options: any, cmd: any) => {
+    let queryStr = options.query;
+    if (!queryStr && rawQuery && rawQuery.length > 0) {
+      queryStr = rawQuery.join(' ');
+    } else if (queryStr && rawQuery && rawQuery.length > 0) {
+      queryStr = `${queryStr} ${rawQuery.join(' ')}`;
+    }
+
+    if (!queryStr && options.file) {
+      const fs = require('fs');
+      const path = require('path');
+      try {
+        queryStr = fs.readFileSync(path.resolve(process.cwd(), options.file), 'utf8');
+      } catch (err: any) {
+        Formatter.printError(new Error(`Failed to read SQL file '${options.file}': ${err.message}`), cmd.optsWithGlobals().json);
+        process.exit(1);
+      }
+    }
+    if (!queryStr || !queryStr.trim()) {
+      Formatter.printError(new Error("Either -q, --query <string>, inline query, or -f, --file <path> is required."), cmd.optsWithGlobals().json);
+      process.exit(1);
+    }
+    const client = getClient(cmd);
+    try {
+      const rows = options.rows ? parseInt(options.rows, 10) : undefined;
+      const result = await client.runSql(queryStr.trim(), { rows, confirm: options.confirm });
+      Formatter.print(result, client.config.json, Formatter.formatSqlResult);
+      process.exit(result.success ? 0 : 1);
+    } catch (err: any) {
+      Formatter.printError(err, client.config.json);
+      process.exit(1);
+    }
+  });
+
+// 15. Reset Token
 
 program
   .command('reset-token')

@@ -1,4 +1,5 @@
 export type SecurityPolicy = 'prompt' | 'block' | 'allow' | 'modal';
+export type SqlSecurityPolicy = 'select-only' | 'prompt' | 'block' | 'allow' | 'modal';
 
 export interface SecurityConfig {
   policy?: SecurityPolicy;
@@ -6,6 +7,7 @@ export interface SecurityConfig {
   clPolicy?: SecurityPolicy;
   pasePolicy?: SecurityPolicy;
   deployPolicy?: SecurityPolicy;
+  sqlPolicy?: SqlSecurityPolicy;
   requireCliClient?: boolean;
   promptTimeoutSeconds?: number;
   customBlockedCommands?: string[];
@@ -103,6 +105,60 @@ const QSH_INVOCATION_PATTERNS = [
   /\/QOpenSys\/usr\/bin\/qsh/i
 ];
 
+/**
+ * Destructive SQL statements that drop objects/schema or perform mass data truncation/deletion.
+ */
+const SQL_DESTRUCTIVE_PATTERNS = [
+  /\bDROP\s+(?:TABLE|VIEW|INDEX|SCHEMA|PROCEDURE|FUNCTION|PACKAGE|TRIGGER|ALIAS|SEQUENCE|VARIABLE|DATABASE)\b/i,
+  /\bTRUNCATE\s+(?:TABLE\s+)?/i,
+  /\bDELETE\s+FROM\b/i,
+  /\bALTER\s+(?:TABLE|SEQUENCE|VIEW|SCHEMA)\b/i,
+  /\bRENAME\s+TABLE\b/i,
+  /\b(?:GRANT|REVOKE)\b/i,
+  /\bCALL\s+(?:QSYS2\.QCMDEXC|QSYS\.QCMDEXC)\b/i,
+  /^@/i
+];
+
+function cleanSqlString(sql: string): string {
+  // Strip block comments /* ... */
+  let clean = sql.replace(/\/\*[\s\S]*?\*\//g, ' ');
+  // Strip line comments -- ...
+  clean = clean.replace(/--.*$/gm, ' ');
+  return clean.trim();
+}
+
+function isReadOnlySqlQuery(sql: string): boolean {
+  const clean = cleanSqlString(sql);
+  if (!clean) return true;
+
+  // Split multiple statements by semicolon
+  const statements = clean.split(';').map(s => s.trim()).filter(Boolean);
+  if (statements.length === 0) return true;
+
+  for (const stmt of statements) {
+    const isQueryStart = /^(?:SELECT|VALUES|DESCRIBE|EXPLAIN)\b/i.test(stmt) ||
+                         /^WITH\s+[\s\S]+\bSELECT\b/i.test(stmt);
+    if (!isQueryStart) {
+      return false;
+    }
+
+    // Prohibit data-change table references inside SELECT (e.g. SELECT * FROM FINAL TABLE (INSERT...))
+    if (/\b(?:FINAL|NEW|OLD)\s+TABLE\s*\(\s*(?:INSERT|UPDATE|DELETE)\b/i.test(stmt)) {
+      return false;
+    }
+    // Prohibit CL command execution via QCMDEXC
+    if (/\b(?:QSYS2|QSYS)\.QCMDEXC\b/i.test(stmt)) {
+      return false;
+    }
+    // Prohibit destructive statements
+    for (const pat of SQL_DESTRUCTIVE_PATTERNS) {
+      if (pat.test(stmt)) return false;
+    }
+  }
+
+  return true;
+}
+
 export class SecurityGuardrail {
   private configGetter: () => SecurityConfig;
   private prompter?: CommandPrompter;
@@ -140,6 +196,7 @@ export class SecurityGuardrail {
 
     const pasePolicy: SecurityPolicy = raw.pasePolicy || 'block';
     const deployPolicy: SecurityPolicy = raw.deployPolicy || 'prompt';
+    const sqlPolicy: SqlSecurityPolicy = raw.sqlPolicy || 'select-only';
 
     return {
       policy: raw.policy || 'prompt',
@@ -147,6 +204,7 @@ export class SecurityGuardrail {
       clPolicy,
       pasePolicy,
       deployPolicy,
+      sqlPolicy,
       promptTimeoutSeconds: raw.promptTimeoutSeconds ?? 60,
       customBlockedCommands: raw.customBlockedCommands || [],
       customPromptCommands: raw.customPromptCommands || [],
@@ -651,5 +709,181 @@ export class SecurityGuardrail {
       pendingChanges,
       message: `Deployment requires confirmation. Please either specify target file(s) to deploy using the select method ('selectedFiles' / -Files) as the top priority, or present the list of all pending changes to the user and re-run with 'confirm: true' (or CLI flag --confirm).`
     };
+  }
+
+  public detectDestructiveSql(sql: string): string | undefined {
+    const clean = cleanSqlString(sql);
+    for (const pat of SQL_DESTRUCTIVE_PATTERNS) {
+      const match = clean.match(pat);
+      if (match) {
+        return match[0].trim();
+      }
+    }
+    return undefined;
+  }
+
+  public isReadOnlySqlQuery(sql: string): boolean {
+    return isReadOnlySqlQuery(sql);
+  }
+
+  public async evaluateSqlCommand(
+    sql: string,
+    optsOrConfirmedOrPrompter?: boolean | EvaluateOptions | CommandPrompter
+  ): Promise<GuardrailDecision> {
+    const cleanSql = (sql || '').trim();
+    if (!cleanSql) {
+      return { allowed: true, status: 'allowed', isDestructive: false };
+    }
+
+    let confirmed = false;
+    let overridePrompter: CommandPrompter | undefined = undefined;
+
+    if (typeof optsOrConfirmedOrPrompter === 'boolean') {
+      confirmed = optsOrConfirmedOrPrompter;
+    } else if (typeof optsOrConfirmedOrPrompter === 'function') {
+      overridePrompter = optsOrConfirmedOrPrompter;
+    } else if (optsOrConfirmedOrPrompter && typeof optsOrConfirmedOrPrompter === 'object') {
+      confirmed = Boolean(optsOrConfirmedOrPrompter.confirmed);
+      overridePrompter = optsOrConfirmedOrPrompter.overridePrompter;
+    }
+
+    const config = this.getConfig();
+
+    // 1. Whitelist check
+    if (this.isWhitelisted(cleanSql, config.allowedCommands)) {
+      return { allowed: true, status: 'allowed', isDestructive: false, reason: 'SQL statement is in allowed whitelist' };
+    }
+
+    // 2. Custom Blocklist check
+    const blockedMatch = this.matchesPatterns(cleanSql, config.customBlockedCommands);
+    if (blockedMatch) {
+      return {
+        allowed: false,
+        status: 'blocked',
+        isDestructive: true,
+        reason: `SQL statement matches custom blocked list: ${blockedMatch}`,
+        matchedPattern: blockedMatch
+      };
+    }
+
+    const sqlPolicy = config.sqlPolicy || 'select-only';
+    const isReadOnly = isReadOnlySqlQuery(cleanSql);
+    const destructiveMatch = this.detectDestructiveSql(cleanSql);
+    const isDestructive = Boolean(destructiveMatch);
+
+    // A. Policy: block
+    if (sqlPolicy === 'block') {
+      return {
+        allowed: false,
+        status: 'blocked',
+        isDestructive,
+        reason: `SQL execution is strictly disabled by security configuration ('code-for-ibmi-bridge.security.sqlPolicy' is 'block').`,
+        matchedPattern: 'environment:sql',
+        message: `Execution of SQL queries and statements is disabled by security configuration. Update 'code-for-ibmi-bridge.security.sqlPolicy' to allow, prompt, or select-only in settings if required.`
+      };
+    }
+
+    // B. Policy: select-only (Default)
+    if (sqlPolicy === 'select-only') {
+      if (isReadOnly) {
+        return {
+          allowed: true,
+          status: 'allowed',
+          isDestructive: false,
+          reason: 'Read-only SQL query allowed under select-only policy'
+        };
+      }
+      return {
+        allowed: false,
+        status: 'blocked',
+        isDestructive,
+        reason: `Only read-only queries (SELECT, VALUES) are permitted by security configuration ('code-for-ibmi-bridge.security.sqlPolicy' is 'select-only').`,
+        matchedPattern: destructiveMatch || 'sql_modification',
+        message: `This SQL statement modifies data or schema (${destructiveMatch || 'modifying statement'}) and is blocked by 'select-only' policy. Update 'code-for-ibmi-bridge.security.sqlPolicy' to 'prompt' or 'allow' in VS Code settings to permit execution.`
+      };
+    }
+
+    // C. Policy: prompt
+    if (sqlPolicy === 'prompt') {
+      if (isReadOnly) {
+        return {
+          allowed: true,
+          status: 'allowed',
+          isDestructive: false,
+          reason: 'Read-only SQL query allowed without prompt'
+        };
+      }
+      if (confirmed) {
+        return {
+          allowed: true,
+          status: 'confirmed',
+          isDestructive,
+          reason: `SQL statement execution approved by user confirmation`,
+          matchedPattern: destructiveMatch || 'sql_modification'
+        };
+      }
+      return {
+        allowed: false,
+        status: 'confirmation_required',
+        isDestructive,
+        reason: destructiveMatch
+          ? `Destructive SQL statement requires confirmation (${destructiveMatch})`
+          : `Modifying SQL statement requires confirmation ('code-for-ibmi-bridge.security.sqlPolicy' is 'prompt')`,
+        matchedPattern: destructiveMatch || 'sql_modification',
+        message: `SQL statement execution requires explicit confirmation. Please confirm with the user and re-run with 'confirm: true' (or CLI flag --confirm).`
+      };
+    }
+
+    // D. Policy: modal
+    if (sqlPolicy === 'modal') {
+      if (isReadOnly) {
+        return {
+          allowed: true,
+          status: 'allowed',
+          isDestructive: false,
+          reason: 'Read-only SQL query allowed without prompt'
+        };
+      }
+      if (confirmed) {
+        return {
+          allowed: true,
+          status: 'confirmed',
+          isDestructive,
+          reason: 'SQL execution approved by confirmation',
+          matchedPattern: destructiveMatch || 'sql_modification'
+        };
+      }
+      const modalDecision = await this.promptInteractive(
+        cleanSql,
+        'sql',
+        destructiveMatch ? `Destructive SQL statement: ${destructiveMatch}` : `Modifying SQL statement execution requires approval`,
+        destructiveMatch || 'sql_modification',
+        isDestructive,
+        overridePrompter
+      );
+      return modalDecision;
+    }
+
+    // E. Policy: allow
+    if (sqlPolicy === 'allow') {
+      if (isDestructive && config.policy === 'block') {
+        return {
+          allowed: false,
+          status: 'blocked',
+          isDestructive: true,
+          reason: `Destructive SQL statement blocked by global destructive policy (${destructiveMatch})`,
+          matchedPattern: destructiveMatch
+        };
+      }
+      return {
+        allowed: true,
+        status: 'allowed',
+        isDestructive,
+        reason: 'SQL statement allowed by policy',
+        matchedPattern: destructiveMatch
+      };
+    }
+
+    return { allowed: true, status: 'allowed', isDestructive: false };
   }
 }

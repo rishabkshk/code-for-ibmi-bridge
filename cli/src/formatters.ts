@@ -64,7 +64,15 @@ export class Formatter {
     console.log(`Token Configured:      ${status.tokenConfigured ? '\x1b[32m✔ Yes\x1b[0m' : '\x1b[31m✖ No\x1b[0m'}`);
     console.log(`Base Extension Found:  ${status.extensionFound ? '\x1b[32m✔ Installed\x1b[0m' : '\x1b[31m✖ Missing\x1b[0m'}`);
     console.log(`Base Extension Active: ${status.extensionActive ? '\x1b[32m✔ Active\x1b[0m' : '\x1b[33m✖ Inactive\x1b[0m'}`);
-    console.log(`Security Policy:       \x1b[36m${status.securityPolicy || 'prompt'}\x1b[0m (QSH: \x1b[33m${status.qshPolicy || 'block'}\x1b[0m, CL: \x1b[35m${status.clPolicy || 'prompt'}\x1b[0m)`);
+    const secParts = [
+      `QSH: \x1b[33m${status.qshPolicy || 'block'}\x1b[0m`,
+      `CL: \x1b[35m${status.clPolicy || 'prompt'}\x1b[0m`,
+      `SQL: \x1b[34m${status.sqlPolicy || 'select-only'}\x1b[0m`
+    ];
+    console.log(`Security Policy:       \x1b[36m${status.securityPolicy || 'prompt'}\x1b[0m (${secParts.join(', ')})`);
+    if (status.sqlJobId) {
+      console.log(`SQL Job ID:            \x1b[90m${status.sqlJobId}\x1b[0m`);
+    }
     if (status.fallbackToCurl && !status.npmFound) {
       console.log(`CLI Mode:              \x1b[33mcurl/PowerShell Fallback\x1b[0m`);
       if (status.fallbackScript) {
@@ -203,6 +211,70 @@ export class Formatter {
       if (result.stdout && result.stdout.trim()) {
         console.log(`\n\x1b[1mOutput (stdout):\x1b[0m\n${result.stdout}`);
       }
+    }
+  }
+
+  public static formatSqlResult(result: any): void {
+    if (!result.success) {
+      console.log(`\x1b[31m✖ SQL execution failed${result.sqlstate ? ` [SQLSTATE: ${result.sqlstate}]` : ''}\x1b[0m`);
+      if (result.error) {
+        console.log(`  ${result.error}`);
+      }
+      return;
+    }
+
+    if (result.hasResults && Array.isArray(result.rows) && result.rows.length > 0) {
+      const columns: string[] = (result.columns && result.columns.length > 0)
+        ? result.columns
+        : Object.keys(result.rows[0]);
+
+      // Calculate column widths
+      const colWidths: Record<string, number> = {};
+      for (const col of columns) {
+        colWidths[col] = col.length;
+      }
+      for (const row of result.rows) {
+        for (const col of columns) {
+          const valStr = row[col] !== null && row[col] !== undefined ? String(row[col]) : 'NULL';
+          if (valStr.length > (colWidths[col] || 0)) {
+            colWidths[col] = Math.min(valStr.length, 60);
+          }
+        }
+      }
+
+      // Top border
+      const topBorder = '┌' + columns.map(c => '─'.repeat((colWidths[c] || 0) + 2)).join('┬') + '┐';
+      const headerRow = '│' + columns.map(c => ' \x1b[1m' + c.padEnd(colWidths[c] || 0) + '\x1b[0m ').join('│') + '│';
+      const headerSep = '├' + columns.map(c => '─'.repeat((colWidths[c] || 0) + 2)).join('┼') + '┤';
+      const bottomBorder = '└' + columns.map(c => '─'.repeat((colWidths[c] || 0) + 2)).join('┴') + '┘';
+
+      console.log(topBorder);
+      console.log(headerRow);
+      console.log(headerSep);
+      for (const row of result.rows) {
+        const rowLine = '│' + columns.map(c => {
+          const val = row[c];
+          const isNull = val === null || val === undefined;
+          let str = isNull ? 'NULL' : String(val);
+          if (str.length > (colWidths[c] || 0)) {
+            str = str.substring(0, (colWidths[c] || 0) - 3) + '...';
+          }
+          const padded = typeof val === 'number'
+            ? str.padStart(colWidths[c] || 0)
+            : str.padEnd(colWidths[c] || 0);
+          return isNull ? ` \x1b[90m${padded}\x1b[0m ` : ` ${padded} `;
+        }).join('│') + '│';
+        console.log(rowLine);
+      }
+      console.log(bottomBorder);
+
+      const timingStr = result.executionTimeMs !== undefined ? ` in ${result.executionTimeMs}ms` : '';
+      const jobStr = result.jobId ? `, job: ${result.jobId}` : '';
+      console.log(`\x1b[90m(${result.rowCount} row${result.rowCount === 1 ? '' : 's'} returned${jobStr}${timingStr})\x1b[0m`);
+    } else {
+      const timingStr = result.executionTimeMs !== undefined ? ` in ${result.executionTimeMs}ms` : '';
+      const jobStr = result.jobId ? ` (job: ${result.jobId})` : '';
+      console.log(`\x1b[32m✔ Statement executed successfully.\x1b[0m (0 rows returned${jobStr}${timingStr})`);
     }
   }
 }

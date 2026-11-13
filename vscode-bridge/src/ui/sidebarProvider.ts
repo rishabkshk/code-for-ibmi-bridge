@@ -84,7 +84,8 @@ export class BridgeSidebarProvider implements vscode.TreeDataProvider<BridgeTree
         new BridgeTreeItem(`QSH Policy: ${sec.qshPolicy}`, vscode.TreeItemCollapsibleState.None, 'sec-qsh', new vscode.ThemeIcon('terminal-bash')),
         new BridgeTreeItem(`PASE Policy: ${sec.pasePolicy}`, vscode.TreeItemCollapsibleState.None, 'sec-pase', new vscode.ThemeIcon('terminal-powershell')),
         new BridgeTreeItem(`CL Policy: ${sec.clPolicy}`, vscode.TreeItemCollapsibleState.None, 'sec-cl', new vscode.ThemeIcon('terminal')),
-        new BridgeTreeItem(`Deploy Policy: ${sec.deployPolicy}`, vscode.TreeItemCollapsibleState.None, 'sec-deploy', new vscode.ThemeIcon('cloud-upload'))
+        new BridgeTreeItem(`Deploy Policy: ${sec.deployPolicy}`, vscode.TreeItemCollapsibleState.None, 'sec-deploy', new vscode.ThemeIcon('cloud-upload')),
+        new BridgeTreeItem(`SQL Policy: ${sec.sqlPolicy}`, vscode.TreeItemCollapsibleState.None, 'sec-sql', new vscode.ThemeIcon('database'))
       ];
     }
 
@@ -97,6 +98,14 @@ export class BridgeSidebarProvider implements vscode.TreeDataProvider<BridgeTree
           new vscode.ThemeIcon('gear'),
           'Open dedicated settings page',
           { command: 'codeForIBMiBridge.openSettings', title: 'Open Settings' }
+        ),
+        new BridgeTreeItem(
+          'Open Bridge Output Log',
+          vscode.TreeItemCollapsibleState.None,
+          'action-show-output',
+          new vscode.ThemeIcon('output'),
+          'Show Bridge server command and result logs',
+          { command: 'codeForIBMiBridge.showOutput', title: 'Open Bridge Output Log' }
         ),
         new BridgeTreeItem(
           'Generate AI Agent Instructions',

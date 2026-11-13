@@ -67,6 +67,18 @@ export interface RemoteCommandResult {
   command: string;
 }
 
+export interface SqlExecutionResult {
+  success: boolean;
+  hasResults: boolean;
+  rowCount: number;
+  columns?: string[];
+  rows?: Record<string, any>[];
+  jobId?: string;
+  executionTimeMs?: number;
+  error?: string;
+  sqlstate?: string;
+}
+
 export interface BridgeStatus {
   ready: boolean;
   extensionFound: boolean;
@@ -76,6 +88,8 @@ export interface BridgeStatus {
   connectionName?: string;
   host?: string;
   port?: number;
+  sqlEnabled?: boolean;
+  sqlJobId?: string;
 }
 
 export interface CodeForIBMi {

@@ -2,7 +2,7 @@
   "name": "codefori-cli",
   "displayName": "Code for IBM i CLI",
   "description": "Programmatic bridge enabling external automation, shell scripts, and AI agents to invoke Code for IBM i actions, manage IFS deployments, and trigger builds.",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "icon": "icon.png",
   "publisher": "rishabkshk",
   "license": "MIT",
@@ -79,6 +79,11 @@
         "icon": "$(gear)"
       },
       {
+        "command": "codeForIBMiBridge.showOutput",
+        "title": "Code for IBM i Bridge: Show Output Log",
+        "icon": "$(output)"
+      },
+      {
         "command": "codeForIBMiBridge.generateAgentDoc",
         "title": "Code for IBM i Bridge: Generate AI Agent Instructions (AGENTS.md)",
         "icon": "$(book)"
@@ -109,6 +114,11 @@
           "group": "navigation"
         },
         {
+          "command": "codeForIBMiBridge.showOutput",
+          "when": "view == codeForIBMiBridge.sidebar",
+          "group": "navigation"
+        },
+        {
           "command": "codeForIBMiBridge.showStatus",
           "when": "view == codeForIBMiBridge.sidebar",
           "group": "navigation"
@@ -127,6 +137,11 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically start the Bridge HTTP server upon extension activation."
+        },
+        "code-for-ibmi-bridge.logCommands": {
+          "type": "boolean",
+          "default": true,
+          "description": "Log executed bridge commands, queries, and returned results to the 'Code for IBM i Bridge' Output channel."
         },
         "code-for-ibmi-bridge.cliMode": {
           "type": "string",
@@ -232,6 +247,25 @@
           ],
           "default": "prompt",
           "markdownDescription": "Security policy governing workspace deployments to IBM i IFS. `'prompt'` requires file selection or user confirmation with the change list (default), `'modal'` shows VS Code dialog, `'block'` prohibits unselected deploys, `'allow'` permits deployment."
+        },
+        "code-for-ibmi-bridge.security.sqlPolicy": {
+          "type": "string",
+          "enum": [
+            "select-only",
+            "prompt",
+            "modal",
+            "block",
+            "allow"
+          ],
+          "enumDescriptions": [
+            "Only read-only queries (SELECT, VALUES) are permitted without prompts. Modifying or DDL statements are strictly blocked (Default).",
+            "Read-only queries run freely. Modifying or destructive statements require explicit confirmation (--confirm).",
+            "Read-only queries run freely. Modifying or destructive statements prompt for user approval via interactive VS Code dialog.",
+            "Strictly block all SQL execution completely.",
+            "Permit all SQL statements without confirmation prompts."
+          ],
+          "default": "select-only",
+          "markdownDescription": "Security policy governing SQL statement execution via `/run-sql`. `'select-only'` (default) permits safe queries (e.g., system catalogs, SELECT) with zero friction while strictly blocking data and schema changes."
         },
         "code-for-ibmi-bridge.security.promptTimeoutSeconds": {
           "type": "number",

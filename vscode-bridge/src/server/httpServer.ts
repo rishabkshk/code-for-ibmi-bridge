@@ -16,6 +16,8 @@ export class BridgeServer {
   private fallbackToCurl: boolean = true;
   private fallbackScript?: string;
   private npmFound: boolean = true;
+  private logger?: (msg: string) => void;
+  private isLogEnabled: () => boolean = () => true;
 
   constructor(
     token: string,
@@ -27,6 +29,13 @@ export class BridgeServer {
     this.adapter = adapter;
     this.onTokenResetCallback = onTokenReset;
     this.guardrail = guardrail || new SecurityGuardrail();
+  }
+
+  public setLogger(logger: (msg: string) => void, isLogEnabled?: () => boolean): void {
+    this.logger = logger;
+    if (isLogEnabled) {
+      this.isLogEnabled = isLogEnabled;
+    }
   }
 
   public setFallbackInfo(fallbackToCurl: boolean, fallbackScript?: string, npmFound: boolean = true): void {
@@ -82,7 +91,13 @@ export class BridgeServer {
         guardrail: this.guardrail,
         fallbackToCurl: this.fallbackToCurl,
         fallbackScript: this.fallbackScript,
-        npmFound: this.npmFound
+        npmFound: this.npmFound,
+        log: (msg: string) => {
+          if (this.logger && this.isLogEnabled()) {
+            this.logger(msg);
+          }
+        },
+        isLogEnabled: () => Boolean(this.logger && this.isLogEnabled())
       };
 
       this.server = http.createServer((req, res) => {

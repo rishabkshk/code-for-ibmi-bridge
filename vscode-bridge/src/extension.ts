@@ -6,7 +6,7 @@ import * as os from 'os';
 import { exec } from 'child_process';
 import { CodeForIBMiAdapter } from './ibmi/adapter';
 import { BridgeServer } from './server/httpServer';
-import { SecurityGuardrail, SecurityConfig, SecurityPolicy } from './security/guardrail';
+import { SecurityGuardrail, SecurityConfig, SecurityPolicy, SqlSecurityPolicy } from './security/guardrail';
 import { SettingsWebviewPanel } from './ui/settingsWebview';
 import { BridgeSidebarProvider } from './ui/sidebarProvider';
 
@@ -285,12 +285,23 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     if (!deployPolicy) deployPolicy = 'prompt';
 
+    // SQL policy (default: 'select-only')
+    let sqlPolicy = getVal<SqlSecurityPolicy | undefined>('sqlPolicy', undefined);
+    if (!sqlPolicy) {
+      const sqlKebab = kebabConfig.get<SqlSecurityPolicy>('sql-policy') || kebabConfig.get<SqlSecurityPolicy>('sql');
+      if (sqlKebab) {
+        sqlPolicy = sqlKebab;
+      }
+    }
+    if (!sqlPolicy) sqlPolicy = 'select-only';
+
     return {
       policy,
       qshPolicy,
       clPolicy,
       pasePolicy,
       deployPolicy,
+      sqlPolicy,
       requireCliClient: getVal<boolean>('requireCliClient', true),
       promptTimeoutSeconds: getVal<number>('promptTimeoutSeconds', 60),
       customBlockedCommands: getVal<string[]>('customBlockedCommands', []),
@@ -337,6 +348,13 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // 4. Initialize HTTP Server
   bridgeServer = new BridgeServer(token, adapter, handleTokenReset, guardrail);
+  bridgeServer.setLogger(
+    (msg: string) => outputChannel?.appendLine(msg),
+    () => {
+      const cfg = vscode.workspace.getConfiguration('code-for-ibmi-bridge');
+      return cfg.get<boolean>('logCommands', true);
+    }
+  );
 
   // Detect npm and native binary availability
   const npmInstalled = await checkNpmInstalled();
@@ -524,6 +542,12 @@ export async function activate(context: vscode.ExtensionContext) {
         label: '$(cloud-upload) Workspace Deploy Policy',
         description: `Current: ${config.deployPolicy}`,
         detail: 'Controls workspace deployment to IBM i IFS; prioritizes targeted file selection over blanket deploys'
+      },
+      {
+        id: 'sqlPolicy',
+        label: '$(database) SQL Statements Policy',
+        description: `Current: ${config.sqlPolicy}`,
+        detail: 'Controls execution of SQL queries and statements (/run-sql). Default is select-only.'
       }
     ];
 
@@ -537,17 +561,23 @@ export async function activate(context: vscode.ExtensionContext) {
       : chosenCategory.id === 'qshPolicy' ? config.qshPolicy
       : chosenCategory.id === 'pasePolicy' ? config.pasePolicy
       : chosenCategory.id === 'clPolicy' ? config.clPolicy
-      : config.deployPolicy;
+      : chosenCategory.id === 'deployPolicy' ? config.deployPolicy
+      : config.sqlPolicy;
 
     const policyChoices = [
+      ...(chosenCategory.id === 'sqlPolicy' ? [{
+        label: 'select-only',
+        description: 'Permit safe read-only queries (SELECT, VALUES). Block all data/schema modifications.',
+        picked: currentVal === 'select-only'
+      }] : []),
       {
         label: 'block',
-        description: 'Strictly block execution automatically without prompts',
+        description: chosenCategory.id === 'sqlPolicy' ? 'Strictly block all SQL execution completely' : 'Strictly block execution automatically without prompts',
         picked: currentVal === 'block'
       },
       {
         label: 'prompt',
-        description: 'Require AI agent or client to request user confirmation in chat before execution',
+        description: chosenCategory.id === 'sqlPolicy' ? 'Queries run freely; modifications require explicit confirmation (--confirm)' : 'Require AI agent or client to request user confirmation in chat before execution',
         picked: currentVal === 'prompt'
       },
       {
@@ -636,6 +666,8 @@ export async function activate(context: vscode.ExtensionContext) {
       `PASE Policy: ${secConfig.pasePolicy}`,
       `CL Policy: ${secConfig.clPolicy}`,
       `Deploy Policy: ${secConfig.deployPolicy}`,
+      `SQL Policy: ${secConfig.sqlPolicy}`,
+      '$(output) View Bridge Output Log',
       'Configure CLI Mode (auto / npm / curl)',
       'Configure Security Policy',
       'Copy Token to Clipboard',
@@ -644,11 +676,13 @@ export async function activate(context: vscode.ExtensionContext) {
     ];
 
     const choice = await vscode.window.showQuickPick(items, {
-      placeHolder: `Code for IBM i Bridge running at http://${host}:${port} [CLI: ${activeMethod} | Destructive: ${secConfig.policy} | QSH: ${secConfig.qshPolicy} | PASE: ${secConfig.pasePolicy} | CL: ${secConfig.clPolicy}]`
+      placeHolder: `Code for IBM i Bridge running at http://${host}:${port} [CLI: ${activeMethod} | Destructive: ${secConfig.policy} | SQL: ${secConfig.sqlPolicy}]`
     });
 
     if (choice === '$(gear) Settings') {
       openSettingsCmd();
+    } else if (choice === '$(output) View Bridge Output Log') {
+      outputChannel?.show(true);
     } else if (choice === 'Configure CLI Mode (auto / npm / curl)' || choice?.startsWith('CLI Mode:')) {
       configureCliModeCmd();
     } else if (choice === 'Configure Security Policy') {
@@ -743,6 +777,9 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('codeForIBMiBridge.configureSecurity', configureSecurityCmd),
     vscode.commands.registerCommand('codeForIBMiBridge.configureCliMode', configureCliModeCmd),
     vscode.commands.registerCommand('codeForIBMiBridge.showStatus', showStatusCmd),
+    vscode.commands.registerCommand('codeForIBMiBridge.showOutput', () => {
+      outputChannel?.show(true);
+    }),
     vscode.commands.registerCommand('codeForIBMiBridge.copyCurlCommand', copyCurlCommandCmd),
     vscode.commands.registerCommand('codeForIBMiBridge.installNpmCli', installNpmCliCmd),
     vscode.commands.registerCommand('codeForIBMiBridge.generateAgentDoc', generateAgentDocCmd)
@@ -964,6 +1001,7 @@ export function generateAgentDocContent(cliCmd: string): string {
     `3. **Destructive Operations Require User Confirmation**: Any command that deletes or clears objects (\`DLTLIB\`, \`DLTOBJ\`, \`DLTF\`, \`CLRPFM\`, etc.) requires explicit confirmation. Prompt the user in chat first, and once confirmed, pass \`--confirm\`.`,
     `4. **Targeted Deployment**: When deploying files, prioritize targeting specific modified files using \`--files "path/to/file"\` rather than blanket deploys. Blanket deploys require \`--confirm\`.`,
     `5. **Inspect Compiler Messages**: Never speculate on why a build failed. Always inspect the compiler listing via \`${cliCmd} diagnostics\` or \`${cliCmd} read-eventf\`.`,
+    `6. **SQL Queries**: Use \`${cliCmd} run-sql -q "SELECT ..."\` to query database tables and IBM i system catalogs (\`QSYS2.OBJECT_STATISTICS\`, \`QSYS2.SYSCOLUMNS\`, \`QSYS2.ACTIVE_JOB_INFO\`). By default, \`sqlPolicy: select-only\` permits read-only queries with zero friction while blocking modifications.`,
     ``,
     `## Quick Reference`,
     `\`\`\`bash`,
@@ -985,6 +1023,9 @@ export function generateAgentDocContent(cliCmd: string): string {
     ``,
     `# Run CL command (requires --confirm)`,
     `${cliCmd} run-cl -c "DSPOBJD OBJ(MYLIB/*ALL) OBJTYPE(*PGM)" --confirm`,
+    ``,
+    `# Query system catalogs or database tables`,
+    `${cliCmd} run-sql -q "SELECT OBJNAME, OBJTYPE, OBJTEXT FROM TABLE(QSYS2.OBJECT_STATISTICS('MYLIB', '*ALL'))"`,
     `\`\`\``
   ].join('\n');
 }

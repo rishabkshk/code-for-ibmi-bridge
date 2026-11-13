@@ -11,6 +11,11 @@ export const CLIENT_ERROR_RESPONSE = JSON.stringify({
   cliCommand: 'codefori',
   reason: 'Direct raw curl calls bypass security guardrails and parameter escaping. Use the official codefori CLI.'
 });
+export const OUTDATED_CLI_ERROR_RESPONSE = JSON.stringify({
+  error: "Your CLI version is outdated. Please update via 'npm install -g @rishabkshk/codefori-cli'.",
+  cliCommand: 'npm install -g @rishabkshk/codefori-cli',
+  reason: "Missing 'X-CodeForIBMi-Client' header required by modern Code for IBM i Bridge server."
+});
 
 /**
  * Validates a token using timing-safe comparison.
@@ -79,11 +84,14 @@ export function validateClientHeader(
   const isCliUserAgent = typeof userAgent === 'string' && userAgent.toLowerCase().includes('codefori');
 
   if (!isCliHeader && !isCliUserAgent) {
+    const userAgentStr = (Array.isArray(userAgent) ? userAgent[0] : String(userAgent)).toLowerCase();
+    const isCurl = userAgentStr.includes('curl');
+
     res.writeHead(403, {
       'Content-Type': 'application/json',
       'X-Content-Type-Options': 'nosniff'
     });
-    res.end(CLIENT_ERROR_RESPONSE);
+    res.end(isCurl ? CLIENT_ERROR_RESPONSE : OUTDATED_CLI_ERROR_RESPONSE);
     return false;
   }
 
